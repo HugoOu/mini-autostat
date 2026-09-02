@@ -1,0 +1,151 @@
+"""可视化工具（T3.3）：生成 PNG + 等价文本表格（README 多模态兼容特性）。
+
+每个图表必附等价文本表格，确保纯文本 LLM 与无图环境可完整理解图表内容。
+中文字体使用 Microsoft YaHei（Windows 自带，D-015 登记）。
+"""
+from __future__ import annotations
+
+import json
+import re
+import time
+from pathlib import Path
+
+import matplotlib
+
+matplotlib.use("Agg")  # 无显示环境
+import matplotlib.pyplot as plt
+import pandas as pd
+from langchain_core.tools import tool
+
+from core import datastore
+
+plt.rcParams["font.sans-serif"] = ["Microsoft YaHei", "SimHei", "sans-serif"]
+plt.rcParams["axes.unicode_minus"] = False
+
+_FIG_DIR: Path | None = None  # 延迟初始化，由 configure_figures_dir 注入
+
+
+def configure_figures_dir(path) -> None:
+    """设置图表输出目录（app 启动时按 config.output_dir 调用）。"""
+    global _FIG_DIR
+    _FIG_DIR = Path(path)
+    _FIG_DIR.mkdir(parents=True, exist_ok=True)
+
+
+def _dumps(obj) -> str:
+    return json.dumps(obj, ensure_ascii=False, default=str)
+
+
+def _get(key: str) -> pd.DataFrame:
+    if not datastore.has_df(key) and key != "current" and datastore.has_df("current"):
+        return datastore.get_df("current")
+    return datastore.get_df(key)
+
+
+def _slug(title: str) -> str:
+    text = re.sub(r"[^\w\u4e00-\u9fff-]+", "_", title.strip())[:40] or "chart"
+    return f"{text}_{int(time.time() * 1000) % 10**8}"
+
+
+def _text_table(df: pd.DataFrame, chart_type: str, x: str, y: str,
+                hue: str, title: str, n_preview: int) -> str:
+    """图表的等价文本表示（纯文本 LLM 可读）。"""
+    lines = [
+        f"[图表类型: {chart_type}]",
+        f"[标题: {title or f'{y} vs {x}'}]",
+        f"[X轴: {x}]" + (f" | [分组: {hue}]" if hue else ""),
+        f"[Y轴: {y}]",
+        f"[数据点数量: {len(df)}]",
+        f"[X范围: {df[x].min()} - {df[x].max()}]",
+        f"[Y范围: {df[y].min()} - {df[y].max()}]",
+    ]
+    if chart_type in ("scatter", "line") and pd.api.types.is_numeric_dtype(df[x]):
+        corr = df[x].corr(df[y])
+        lines.append(f"[相关系数: {corr:.3f}]")
+    if hue and hue in df.columns:
+        lines.append("[分组摘要:]")
+        for g in df[hue].unique():
+            gd = df[df[hue] == g]
+            lines.append(
+                f"  {g}: n={len(gd)}, {x}均值={gd[x].mean():.2f}, {y}均值={gd[y].mean():.2f}"
+            )
+    lines.append(f"[数据点详情(前{n_preview}个):]")
+    cols = [c for c in (x, y, hue) if c and c in df.columns]
+    for _, row in df[cols].head(n_preview).iterrows():
+        lines.append("  " + ", ".join(f"{c}={row[c]}" for c in cols))
+    return "\n".join(lines)
+
+
+@tool
+def create_chart(
+    chart_type: str,
+    x: str,
+    y: str,
+    hue: str = "",
+    title: str = "",
+    df_key: str = "current",
+    n_preview: int = 10,
+) -> str:
+    """生成图表 PNG 并返回等价文本表格。chart_type 支持 scatter / line / bar；
+    x、y 为列名；hue 为可选分组列；返回 JSON 含 image_path 与 text_table。"""
+    try:
+        df = _get(df_key)
+    except KeyError as e:
+        return _dumps({"error": str(e)})
+
+    chart_type = chart_type.strip().lower()
+    if chart_type not in ("scatter", "line", "bar"):
+        return _dumps({"error": f"不支持的图表类型: {chart_type}（可选 scatter/line/bar）"})
+    for c in (x, y):
+        if c not in df.columns:
+            return _dumps({"error": f"列不存在: {c}"})
+    if hue and hue not in df.columns:
+        return _dumps({"error": f"分组列不存在: {hue}"})
+
+    sub = df[[c for c in (x, y, hue) if c]].replace(
+        [float("inf"), -float("inf")], float("nan")
+    ).dropna()
+    if sub.empty:
+        return _dumps({"error": "剔除缺失值后无数据可绘图"})
+
+    fig, ax = plt.subplots(figsize=(9, 5))
+    try:
+        if chart_type == "scatter":
+            if hue:
+                for g, gd in sub.groupby(hue):
+                    ax.scatter(gd[x], gd[y], label=str(g), s=28, alpha=0.8)
+                ax.legend()
+            else:
+                ax.scatter(sub[x], sub[y], s=28, alpha=0.8)
+        elif chart_type == "line":
+            sub = sub.sort_values(x)
+            if hue:
+                for g, gd in sub.groupby(hue):
+                    ax.plot(gd[x], gd[y], marker="o", markersize=3, label=str(g))
+                ax.legend()
+            else:
+                ax.plot(sub[x], sub[y], marker="o", markersize=3)
+        else:  # bar
+            agg = sub.groupby(x)[y].mean()
+            agg.plot(kind="bar", ax=ax)
+            ax.set_ylabel(f"{y}（均值）")
+        ax.set_xlabel(x)
+        ax.set_ylabel(y)
+        ax.set_title(title or f"{y} vs {x}")
+        ax.grid(alpha=0.3)
+        fig.tight_layout()
+
+        if _FIG_DIR is None:
+            configure_figures_dir("outputs/figures")
+        filename = f"{_slug(title or y)}.png"
+        image_path = str(_FIG_DIR / filename)
+        fig.savefig(image_path, dpi=150)
+    finally:
+        plt.close(fig)
+
+    text_table = _text_table(sub, chart_type, x, y, hue, title, n_preview)
+    return _dumps({"image_path": image_path, "chart_type": chart_type,
+                   "text_table": text_table})
+
+
+TOOLS = [create_chart]

@@ -1,0 +1,21 @@
+# Mini AutoSTAT 依赖清单（demo 最小集）
+# 编排框架
+langgraph>=0.2.0
+langgraph-supervisor>=0.0.10
+
+# LLM 接入（OpenAI-compatible，D-002）
+langchain>=0.3.0
+langchain-core>=0.3.0
+langchain-openai>=0.2.0
+
+# 数据分析与统计
+pandas>=2.0.0
+numpy>=1.24.0
+scipy>=1.10.0
+statsmodels>=0.14.0
+
+# 可视化
+matplotlib>=3.7.0
+
+# 配置
+python-dotenv>=1.0.0

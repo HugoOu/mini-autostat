@@ -1,0 +1,21 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+.pytest_cache/
+
+# 密钥与本地配置（严禁提交）
+.env
+
+# 运行产物
+logs/
+outputs/
+
+# 参考项目：仅供设计思想学习（D-005），不纳入本项目提交
+AutoSTAT/
+
+# IDE
+.idea/
+.vscode/
