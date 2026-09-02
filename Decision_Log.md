@@ -156,6 +156,29 @@
 - **处置**：整文件重写统一版本后恢复一致；
 - **约定**：助手修改文件后，负责人若在 IDE 中打开了同一文件，请勿用旧缓冲区保存覆盖；建议修改后 IDE 端执行"重新加载/还原文件"。
 
+### D-017 | 2026-09-02 | df 回写审核约束 + 升级方向文档（负责人指示）
+1. **df 回写必须经 Leader Agent 审核**（负责人明确指示）：未来实现 U-1 回写通道时，生成代码产出的数据集变更不直接写入 DataStore，须经 Leader 校验（列名合法性、关键列保护、来源代码安全性）通过后方可写入，并在 tracer 留痕；
+2. 新建 [FUTURE_UPGRADES.md](FUTURE_UPGRADES.md) 记录六项升级方向（U-1 df 回写带审核 / U-2 RAG 方法目录 / U-3 方法评议 Agent / U-4 工具合成 / U-5 MCP 动态接入 / U-6 PostgresSaver），演进原则：不动架构、优先填充已预留接口、落地须负责人批准。
+
+### D-018 | 2026-09-02 | M4 编排技术细节（助手自行决定，向负责人报告）
+1. **外层控制图 + supervisor 子图**：`create_supervisor` 返回未编译 StateGraph（源码确认：START→supervisor，supervisor→4 Worker 条件边，Worker→supervisor），以 `state_schema=AnalysisState` 编译为子图节点 `team`；外层图增加 init（入口）/ sync（结果同步与校验）/ gate（终止与回环决策）/ report（出口）四个控制节点——supervisor 架构不变，控制节点在外围；
+2. **状态字段扩展**（state.py 新增 3 字段）：`rejection_counts`（各 Worker 被打回次数，上限 2）、`outer_loops`（外层回环计数，上限 3，防 supervisor 过早 FINISH 后死循环）、`synced_msg_count`（消息游标，增量解析 Worker 输出）；
+3. **max_turns 的兑现方式**：iteration 定义为已完成 Worker 调度数（len(completed_steps)），gate 节点每轮检查 `check_termination`；同时外层 invoke 传 `recursion_limit=max_turns*8+30` 作为 langgraph 层面的硬预算兜底（supervisor/Worker 内部循环会消耗步数，无法精确映射到"轮"，故取宽松倍数，只防失控不干预正常流程）；
+4. **T4.3 双层质量控制**：① supervisor 循环内由 Leader 提示词驱动（看到 Worker 输出立即判断合格性，不合格当场打回，最多 2 次）；② sync 节点做确定性校验（JSON 可解析、必需字段存在、可视化有 image_path），不合格注入校验反馈消息，gate 据此回环让 Leader 处理；
+5. **Worker 输出解析**：按 JSON 块的关键字段分类归属（data_overview→预处理 / findings→描述统计 / analyses→建模 / charts→可视化），不依赖 message.name（各 provider 对 name 字段行为不一）；
+6. **report 节点 M4 为最小实现**（确定性汇总 state 写 outputs/report.md），M5 替换为 LLM 六要素报告。
+
+### D-019 | 2026-09-02 | LLM 客户端超时与重试（助手自行决定，向负责人报告）
+- **背景**：诊断过程中出现网络层 TLS 握手中断（`EOF occurred in violation of protocol`），Agent 可能因网络劣化无限挂起；
+- **决定**：`core/llm.py get_llm()` 统一设置 `timeout=120s` + `max_retries=2`（可用 kwargs 覆盖），单点封装、所有 Agent 生效。
+
+### D-020 | 2026-09-02 | 主图 Checkpointer 选型与子图死锁根因修正
+- **现象**：外层控制图嵌套 supervisor 子图后，`MemorySaver` 与 `SqliteSaver` 两种 checkpointer 下 invoke 均在进入 team 子图时挂起（tracer 日志均止步于 init 的 route 事件）；无 checkpointer 的同一图 77s 正常跑通，team 子图单独 invoke 108s 正常；
+- **根因**：LangGraph 子图默认**继承父图 checkpointer**，嵌套 checkpoint 写入引发死锁（对照实验五组隔离确认）；
+- **修正**：`create_supervisor(...).compile(checkpointer=False)` 显式关闭子图继承，持久化只保留外层图级别——子图消息经 `add_messages` 已汇入主状态，外层 checkpoint 足以支撑 M5 中断恢复；
+- **选型**：demo 采用 `SqliteSaver`（文件级持久化，可跨进程续跑，比 MemorySaver 更贴近 M5 需求）；升级 PostgresSaver 仅改 `build_app` 的 compile 处（D-003 终态不变）；
+- **教训**：此前初判"MemorySaver 与子图嵌套组合死锁、SqliteSaver 可解"不准确——真正的变量是子图是否继承 checkpointer，与 saver 实现无关。
+
 ---
 
 ## 待确认事项

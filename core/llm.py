@@ -19,13 +19,19 @@ def get_llm(
     temperature: float = 0.0,
     **kwargs,
 ) -> ChatOpenAI:
-    """获取共享 LLM 客户端（不缓存：各 Agent 可能需要不同的 temperature）。"""
+    """获取共享 LLM 客户端（不缓存：各 Agent 可能需要不同的 temperature）。
+
+    timeout/max_retries（D-019）：单次调用 120s 超时 + 2 次重试，
+    防止网络劣化时 Agent 无限挂起；可用 kwargs 覆盖。
+    """
     cfg = config or load_config()
     return ChatOpenAI(
         model=cfg.model,
         api_key=cfg.api_key,
         base_url=cfg.base_url,
         temperature=temperature,
+        timeout=kwargs.pop("timeout", 120),
+        max_retries=kwargs.pop("max_retries", 2),
         **kwargs,
     )
 

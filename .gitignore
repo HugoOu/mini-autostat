@@ -12,6 +12,7 @@ venv/
 # 运行产物
 logs/
 outputs/
+checkpoints*.sqlite
 
 # 参考项目：仅供设计思想学习（D-005），不纳入本项目提交
 AutoSTAT/

@@ -48,6 +48,12 @@ class AnalysisState(TypedDict, total=False):
     interruption_reason: str | None
     stop_reason: str | None           # 终止后写入：正常完成 / 达到上限 / 用户停止
 
+    # ---- M4 编排控制（D-018）----
+    rejection_counts: dict            # {"worker_name": 被打回次数}，上限 2
+    outer_loops: int                  # 外层回环计数，上限 3，防止过早 FINISH 死循环
+    synced_msg_count: int             # 消息游标：sync 节点增量解析 Worker 输出
+    remaining_steps: int              # langgraph 1.x ReactAgent 要求的运行时注入字段
+
 
 def check_termination(state: AnalysisState, max_turns: int) -> tuple[bool, str | None]:
     """终止机制（T2.4）：三重条件检查，返回 (是否终止, 原因)。
