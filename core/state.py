@@ -52,6 +52,7 @@ class AnalysisState(TypedDict, total=False):
     rejection_counts: dict            # {"worker_name": 被打回次数}，上限 2
     outer_loops: int                  # 外层回环计数，上限 3，防止过早 FINISH 死循环
     synced_msg_count: int             # 消息游标：sync 节点增量解析 Worker 输出
+    tool_usage: dict                  # {"worker": 本会话真实工具调用次数}（D-024 工具证据检查）
     remaining_steps: int              # langgraph 1.x ReactAgent 要求的运行时注入字段
 
     # ---- M5 中断/确认点（D-022）----

@@ -199,6 +199,24 @@
 - **权衡**：temperature=1 使输出确定性下降（demo 阶段可接受）；架构零改动（D-002 OpenAI-compatible 设计的预期收益）；
 - **验证**：Moonshot 探测 4.6s 返回；用检查点中的真实 M5 状态单独调用 `generate_report`，108s 产出 LLM 六要素报告（校验零缺项），统计量与 tracer 日志逐项一致、无编造——T5.2 LLM 报告路径在线补验通过；离线回归 31 项通过。
 
+### D-024 | 2026-09-03 | 工具调用证据强制检查：从"提示词约束"升级为"确定性校验"（M6 演示发现的真实缺陷修复）
+- **背景**：M6 演示运行（run 20260903_120814，kimi-k2.7-code-highspeed）复盘检查点消息发现：**全部 4 个 Worker 都没有调用任何真实工具**（消息流中只有 transfer_* 交接，无 load_csv/run_descriptive_stats/create_chart 等调用），但输出了看似精确的统计结果——模型凭参数记忆编造。追溯 M5 运行（GLM）同样存在此问题（此前"报告数值与日志一致"的核对只证明了一致性，未证明真实性）；M4 会话产出过 4 张真实 PNG，说明工具使用与否随模型/温度漂移，提示词约束不可靠。考核 U2 明确"只在对话中模拟已经运行不算完成"，此为硬性缺陷；
+- **修复三层**：
+  1. **sync 确定性证据检查**：增量解析时维护 `current_worker` 归属游标（transfer_to_* 置位 / transfer_back 复位）与 `tool_usage` 计数（非交接 tool_call 计数，含失败尝试）；Worker 最终 JSON 若零工具证据 → 判不合格打回，反馈"必须调用工具获取数据后再作答"。新增 `AnalysisState.tool_usage` 字段跨轮累计；
+  2. **Worker 工具级日志**（补 T2.3/U3 缺口）：Worker 的 tool_call（含参数）与 tool_result（含错误）逐条写入 tracer，actor 归属到具体 Worker——此前 jsonl 只有 transfer 与最终 JSON，无法满足"运行记录能看到每步工具调用"；
+  3. **visualizer 渲染失败不得带病通过**：charts 条目缺 image_path → 判不合格打回（此前渲染失败仅因 JSON 结构完整就判"合格"，导致 Leader 带缺失图表 FINISH）；
+- **配套**：data_preprocessor 增加 execute_python 工具（职责内的特征工程，如派生 gdp_growth/差分列——M6 演示中正是因 preprocessor 无法派生列导致恢复链断裂）；四个 Worker 提示词增加"硬性要求"段落说明确定性检查的存在；
+- **权衡**：零工具证据一律打回可能误伤"纯解读类"输出——本系统 Worker 职责均为数据操作型，全部需要工具，规则成立；工具调用失败的尝试也计入 usage（有真实尝试即非编造，错误信息由 tool_result 日志留痕）；
+- **验证**：新增 3 项离线测试（零工具证据打回 / 渲染失败打回 / 工具日志归属），34 项全部通过；重跑 M6 演示验证真实恢复链（见 D-025 后续记录）。
+
+### D-025 | 2026-09-03 | M6 演示验收通过 + 图表证据确定性回写（助手自行决定，向负责人报告）
+- **背景**：D-024 修复后的 M6 完整在线演示（run 20260903_130750_fa21ed，kimi-k2.7-code-highspeed，80 事件，约 6 分钟）通过人工检验。复盘发现两处事实：
+  1. **真实恢复链成立**（考核 U6/B4 证据）：① modeling_analyst 先后调用 `run_correlation_test`/`run_regression_analysis` 因分析列不存在报错（事件 48-51）→ 检测后改用 `execute_python` 自行派生 `renewable_share`/`gdp_growth` 并重跑成功（事件 52-53）；② `renewable_share` ADF 水平值 p=0.9968 非平稳 → 一阶差分后 p=0.0233 平稳，格兰杰检验按差分序列执行（事件 54-57）——即"统计代码报错→检测→修复→重跑成功"与"非平稳→差分→重跑"两条链均有完整日志；③ visualizer 亦有"列不存在→修正列名→成功"链（事件 62-74）；工具调用计数 data_preprocessor=15 / descriptive=3 / modeling=6 / visualizer=7；
+  2. **新缺口**：visualizer 最终消息缺少 charts JSON 块，sync 无从归档——4 张 PNG 实际渲染成功但 `visualizations` 归档为 0，报告只能写"运行中未记录具体图片文件路径"。零工具证据检查（D-024）管住"没干活"，但没管住"干了活没交结构化结果"；
+- **修复**：sync 增加图表证据确定性回写——成功的 `create_chart` 工具结果自带 `image_path` 与等价文本表格，属确定性证据，无论最终 JSON 是否完整都据此回写 `visualizations`（按 image_path 去重，JSON 条目优先，工具结果补缺口），并写 tracer check 事件留痕；
+- **权衡**：选择"从工具证据回写"而非"无 JSON 一律打回"——图表已真实渲染，打回只会浪费轮次重渲染同样的图；证据以工具结果为准与 D-024 的立场一致；
+- **验证**：新增 2 项离线测试（工具证据回写 / JSON 与工具证据去重），36 项全部通过。
+
 ---
 
 ## 待确认事项

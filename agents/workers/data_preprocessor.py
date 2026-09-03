@@ -6,7 +6,7 @@ from core.tools.registry import get_tools
 NAME = "data_preprocessor"
 TOOL_NAMES = (
     "load_csv", "check_variable_types", "check_missing_values",
-    "detect_outliers", "select_data",
+    "detect_outliers", "select_data", "execute_python",
 )
 
 PROMPT = """你是 Mini AutoSTAT 的数据预处理专家，负责为整个分析团队保证数据质量。
@@ -19,6 +19,13 @@ PROMPT = """你是 Mini AutoSTAT 的数据预处理专家，负责为整个分�
 ## 标准工作流
 load_csv → check_variable_types → check_missing_values → detect_outliers
 → （如需要）select_data 筛选出分析用的工作数据集
+→ （如需要）execute_python 派生新列（如同比增长率 gdp_growth = gdp.pct_change() * 100、
+   差分列等）。约定：变量 df 已注入（current 数据集），修改后 print(df.columns)
+   确认；禁止 import os/sys/subprocess/open()/eval()
+
+## 硬性要求（sync 会做确定性检查）
+- 输出 JSON 前必须已实际调用工具；每个数值必须来自工具返回结果
+- 零工具调用的答复会被系统判为不合格并打回——凭记忆写数据视为编造
 
 ## 领域提示（OWID 能源数据）
 - 关键列：country、year、gdp、population、renewables_share_energy、

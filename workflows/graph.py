@@ -20,6 +20,7 @@ PostgresSaver 升级路径（D-003）：本文件唯一需要改动的是 compil
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 
 from langchain_core.messages import AnyMessage, HumanMessage, SystemMessage
@@ -46,10 +47,19 @@ _WORKER_SIGNATURES = {
     "visualizer": ("可视化", "charts", ("charts",)),
 }
 
+# 消息归属合法性（D-024 工具证据检查用）：leader + 全部 Worker 名
+_WORKER_NAMES = {"leader", *_WORKER_SIGNATURES}
+
 
 def _clip(text, limit: int = 500):
     text = text if isinstance(text, str) else json.dumps(text, ensure_ascii=False)
     return text if len(text) <= limit else text[:limit] + "...[truncated]"
+
+
+def _chart_title(text_table: str) -> str:
+    """从等价文本表格中提取图表标题（D-025，无则返回空串）。"""
+    m = re.search(r"\[标题:\s*([^\]]+)\]", text_table or "")
+    return m.group(1).strip() if m else ""
 
 
 def classify_worker(content: str) -> str | None:
@@ -85,6 +95,17 @@ def process_new_messages(state: AnalysisState, tracer: RunTracer) -> dict:
     返回状态增量：completed_steps / rejection_counts / statistical_results /
     visualizations / chart_requests / synced_msg_count，不合格时附带
     反馈 SystemMessage 交 Leader 处理（T4.3 确定性校验层）。
+
+    工具调用证据检查（D-024）：逐条记录 Worker 的真实工具调用与结果到
+    tracer；Worker 最终 JSON 若在本轮没有任何非交接工具调用，判定为
+    「无工具证据」打回——防止模型跳过工具凭参数记忆编造统计数值
+    （考核 U2：真实工具调用，模拟不算完成）。
+
+    图表证据回写（D-025）：visualizer 的最终消息可能缺少 charts JSON 块
+    （M6 演示 run_20260903_130750 实测发生，4 张 PNG 已渲染但
+    visualizations 归档为 0）。成功的 create_chart 工具结果本身携带
+    image_path 与等价文本表格，属确定性证据——无论最终 JSON 是否完整，
+    都据此回写 visualizations（按 image_path 去重）。
     """
     msgs = list(state.get("messages") or [])
     cursor = state.get("synced_msg_count") or 0
@@ -99,23 +120,74 @@ def process_new_messages(state: AnalysisState, tracer: RunTracer) -> dict:
     viz = list(state.get("visualizations") or [])
     chart_reqs = list(state.get("chart_requests") or [])
     feedback: list[SystemMessage] = []
+    usage: dict[str, int] = dict(state.get("tool_usage") or {})  # D-024
+    tool_charts: list[dict] = []  # D-025：create_chart 成功结果的确定性证据
+    current_worker = None  # transfer_to_* 后的归属游标
 
     for msg in new_msgs:
         content = getattr(msg, "content", "")
+
+        # ---- ToolMessage：真实工具执行结果，归属当前 Worker 并记录 ----
+        if hasattr(msg, "tool_call_id"):
+            tname = getattr(msg, "name", "") or ""
+            if not tname.startswith("transfer") and current_worker:
+                err = _clip(content, 200) \
+                    if getattr(msg, "status", "") == "error" else None
+                tracer.log(current_worker, "tool_result",
+                           tool={"name": tname, "provider": "native"},
+                           output_summary=_clip(content, 300), error=err)
+                # D-025：成功渲染的图表在工具结果中自带 image_path，
+                # 即使最终 JSON 缺失也可确定性回写（防「已渲染未归档」）
+                if tname == "create_chart":
+                    r = parse_json_block(content)
+                    if isinstance(r, dict) and r.get("image_path"):
+                        tool_charts.append(r)
+            continue
+
+        # ---- AIMessage：先处理工具调用（交接游标 / Worker 工具证据）----
+        for tc in getattr(msg, "tool_calls", None) or []:
+            tname = tc["name"]
+            if tname.startswith("transfer_to_"):
+                current_worker = tname[len("transfer_to_"):]
+                tracer.log("leader", "tool_call",
+                           tool={"name": tname, "provider": "native",
+                                 "args": _clip(tc.get("args"))})
+            elif tname.startswith("transfer_back"):
+                current_worker = None
+                tracer.log("leader", "tool_call",
+                           tool={"name": tname, "provider": "native",
+                                 "args": _clip(tc.get("args"))})
+            else:
+                actor = getattr(msg, "name", None)
+                actor = actor if actor in _WORKER_NAMES else (current_worker or "system")
+                usage[actor] = usage.get(actor, 0) + 1
+                tracer.log(actor, "tool_call",
+                           tool={"name": tname, "provider": "native",
+                                 "args": _clip(tc.get("args"))})
+
         if not isinstance(content, str) or not content.strip():
             continue
-        for tc in getattr(msg, "tool_calls", None) or []:
-            tracer.log("leader", "tool_call",
-                       tool={"name": tc["name"], "provider": "native",
-                             "args": _clip(tc.get("args"))})
-
         worker = classify_worker(content)
         if worker is None:
             continue
         label, _key, required = _WORKER_SIGNATURES[worker]
         data = parse_json_block(content)
 
-        if data and all(k in data for k in required):
+        # ---- 确定性校验（T4.3 + D-024）----
+        reasons: list[str] = []
+        if not (data and all(k in data for k in required)):
+            reasons.append(f"缺少 {required}")
+        if usage.get(worker, 0) == 0:
+            reasons.append("本轮没有任何真实工具调用记录（禁止凭空编造结果，"
+                           "必须调用工具获取数据后再作答）")
+        if (worker == "visualizer" and data
+                and all(k in data for k in required)):
+            charts = data.get("charts") or []
+            if any(not (c or {}).get("image_path") for c in charts):
+                reasons.append("存在缺少 image_path 的图表条目"
+                               "（渲染失败必须修复或打回，不得带病通过）")
+
+        if not reasons:
             completed.append({"step": label, "worker": worker, "status": "ok",
                               "summary": _clip(content, 300)})
             if worker == "data_preprocessor":
@@ -151,16 +223,36 @@ def process_new_messages(state: AnalysisState, tracer: RunTracer) -> dict:
                            error=_clip(content, 200))
             else:
                 feedback.append(SystemMessage(content=(
-                    f"[sync 校验] {worker} 的结果不合格（缺少 {required}），"
+                    f"[sync 校验] {worker} 的结果不合格：{'；'.join(reasons)}，"
                     f"第 {n}/{MAX_REJECTIONS} 次打回。请重新调度该 Worker，"
                     "并明确指出需修正的问题。")))
                 tracer.log("leader", "check",
                            decision=f"{worker} 第 {n} 次不合格，打回",
-                           error=_clip(content, 200))
+                           error=_clip("；".join(reasons), 200))
+
+    # D-025：工具证据中的图表按 image_path 去重后并入归档
+    # （JSON 条目优先；工具结果补齐 JSON 未覆盖的部分）
+    seen_paths = {v.get("image_path") for v in viz}
+    added = 0
+    for r in tool_charts:
+        p = r.get("image_path")
+        if p in seen_paths:
+            continue
+        seen_paths.add(p)
+        tt = r.get("text_table") or ""
+        viz.append({"title": _chart_title(tt), "image_path": p,
+                    "status": "ok", "text_table": _clip(tt, 1200)})
+        added += 1
+    if added:
+        tracer.log("visualizer", "check",
+                   decision=f"最终 JSON 未完整包含 charts，"
+                            f"{added} 张图表从 create_chart 工具结果"
+                            "确定性回写（D-025）",
+                   next_action="写回状态字段")
 
     updates.update(completed_steps=completed, rejection_counts=rejections,
                    statistical_results=results, visualizations=viz,
-                   chart_requests=chart_reqs)
+                   chart_requests=chart_reqs, tool_usage=usage)
     if feedback:
         updates["messages"] = feedback
     return updates
@@ -210,6 +302,11 @@ def build_app(
         prompt=build_leader_prompt(config),
         supervisor_name="leader",
         state_schema=AnalysisState,
+        # full_history（D-024）：默认 last_message 只传回 Worker 最终答复，
+        # 真实工具调用消息不进共享状态——sync 的工具证据检查与全链路
+        # 记录都无从取证。改为完整历史后 Worker 的 tool_call/tool_result
+        # 全部可见，QC 与运行记录才满足考核 U2/U3。
+        output_mode="full_history",
     ).compile(checkpointer=False)
 
     # ---- 控制节点 ----
@@ -244,6 +341,17 @@ def build_app(
                        decision=f"存在未处理的不合格结果 {pending_rejections(state)}，"
                                 "回环交 Leader 处理")
             return {"outer_loops": loops + 1, "iteration": iteration}
+
+        # 零工作轮次纠正（D-024 补充）：Leader 未调度任何 Worker 就结束
+        # （如输出纯文本计划向用户提问）——回环要求其立即调度，而非空转收敛
+        if not should_stop and not state.get("completed_steps") and loops < 3:
+            tracer.log("leader", "replan",
+                       decision="上一轮 Leader 未调度任何 Worker（零工作轮次），回环纠正")
+            return {"outer_loops": loops + 1, "iteration": iteration,
+                    "messages": [SystemMessage(content=(
+                        "[系统] 上一轮你没有调度任何 Worker。禁止向用户提问或等待确认："
+                        f"数据文件已就位（{state.get('data_path')}），请立即调用交接工具"
+                        "调度 data_preprocessor 开始执行。"))]}
 
         if not should_stop:
             should_stop, reason = True, (
