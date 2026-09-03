@@ -17,6 +17,13 @@ checkpoints*.sqlite
 # 参考项目：仅供设计思想学习（D-005），不纳入本项目提交
 AutoSTAT/
 
+# 开发过程文档（负责人要求不入库，本地保留）
+Test_Agent.md
+task_decomposition.md
+Self_Check.md
+Decision_Log.md
+artifacts/
+
 # IDE
 .idea/
 .vscode/

@@ -170,18 +170,13 @@ mini_autostat/
 ├── examples/
 │   ├── README.md                 # 示例数据来源、许可与提取命令
 │   └── renewable_energy_gdp.csv  # 中美 2000-2023 演示子集（48 行）
-├── artifacts/
-│   └── m6_demo/                  # M6 演示运行证据副本（jsonl 日志/终端记录/报告）
-├── tests/                        # pytest 离线冒烟测试（M1–M6，38 项）
-├── scripts/                      # 验收脚本（e2e / M5 确认点 / stream 实测 / 组件联调）
-├── logs/                         # 运行日志 run_<id>.jsonl（自动生成）
-├── outputs/                      # 报告与图表（自动生成）
+├── tests/                        # pytest 离线冒烟测试（M1–M6，42 项）
+├── scripts/                      # 诊断与验收脚本（stream 实测 / 报告探针 / 断点恢复 / 报告重生成）
+├── logs/                         # 运行日志 run_<id>.jsonl（自动生成，不入库）
+├── outputs/                      # 报告与图表（自动生成，不入库）
 │   ├── report.md                 # 问题驱动叙事报告（含六要素内容）
 │   └── figures/*.png             # 图表
-├── Decision_Log.md               # 全部架构/技术决策记录（D-001…D-030）
-├── FUTURE_UPGRADES.md            # 升级方向清单（RAG/PostgresSaver/MCP 等）
-├── task_decomposition.md         # 六里程碑任务分解（M1–M6）
-└── Test_Agent.md                 # 考核题目原文
+└── FUTURE_UPGRADES.md            # 升级方向清单（报告 Worker 化/RAG/PostgresSaver/MCP 等）
 ```
 
 ## 📥 输入与输出
@@ -267,51 +262,30 @@ python -m venv .venv
 
 打开 `outputs/report.md`，核对六个叙事章节齐全：**问题与数据 / 分析过程 / 主要发现 / 可靠性 / 局限与适用边界 / 结论**（含「不应得出的结论」小节）；六要素内容分别嵌入对应章节（数据说明→问题与数据；方法及选择原因→分析过程；结果→主要发现；不确定性→可靠性；限制→局限与适用边界）；图表以 `![](路径)` Markdown 图片语法嵌入。抽查方法：取报告中一个统计数值（如 Pearson r），在 `logs/run_<id>.jsonl` 中搜索该数值，应能在 modeling\_analyst 的 `tool_result` 中找到同值——报告只允许引用真实运行结果（`agents/reporter.py` 的 `validate_report` + 兜底降级保障）。
 
-### 检验 8：全链路运行日志（离线即可）
+### 检验 8：全链路运行日志（需一次本地运行，无需 LLM 调用）
 
 日志格式 `logs/run_<id>.jsonl`，每行一个事件，字段：`ts / step / actor / action / decision / tool / input_summary / output_summary / error / next`。快速总览：
 
 ```powershell
-Get-Content artifacts\m6_demo\run_20260903_130750_fa21ed.jsonl | ForEach-Object {
+Get-Content logs\run_<id>.jsonl | ForEach-Object {
     $e = $_ | ConvertFrom-Json
     "{0,3} {1,-22} {2,-12} {3}" -f $e.step, $e.actor, $e.action, $e.decision }
 ```
 
 核对要点：每个 Worker 的 `tool_call`（含真实参数）与 `tool_result`（含真实输出与报错）成对出现；sync 的 `check` 事件记录每步合格性判定。
 
-### 检验 9：异常恢复链（离线，查看已提交证据）
+### 检验 9：异常恢复链（在线复跑后离线查看）
 
-`artifacts/m6_demo/run_20260903_130750_fa21ed.jsonl` 为一次完整真实运行的存档（80 事件）。重点查看第 48–58 行：
+运行记录不入库（`logs/` 已被 .gitignore 排除），请在本地完成至少一次完整在线运行后查看 `logs/run_<id>.jsonl`。以下两条「失败→检测→恢复→成功」链为此前真实运行中验证过的模式，复跑时可在日志中搜索对应事件：
 
-```powershell
-Get-Content artifacts\m6_demo\run_20260903_130750_fa21ed.jsonl |
-    Select-Object -Skip 47 -First 11
-```
+1. **工具报错→自修复**：`run_correlation_test`/`run_regression_analysis` 因分析列不存在报错 → 建模 Worker 改用 `execute_python` 自行派生所需列并重跑成功（搜索 `tool_error`）；
+2. **统计假设不满足→调整**：ADF 检验水平值序列非平稳 → 一阶差分后平稳，格兰杰检验按差分序列执行（搜索 `ADF`）。
 
-**预期看到两条完整「失败→检测→恢复→成功」链**：
-
-1. 事件 48–53：`run_correlation_test`/`run_regression_analysis` 因分析列不存在**报错** → 建模 Worker 检测后改用 `execute_python` 自行派生 `renewable_share`/`gdp_growth` 并**重跑成功**；
-2. 事件 54–57：ADF 检验 `renewable_share` 水平值 p=0.9968 **非平稳** → 一阶差分后 p=0.0233 平稳，格兰杰检验按差分序列执行。
-
-另有 visualizer「列不存在→修正列名→成功」链（事件 62–74）与最终报告产出（`reporter` check 通过，事件 78–79）。
-
-### 检验 10：考核项自检表核对（离线）
-
-打开 [Self\_Check.md](Self_Check.md)：题目 B 8 条 + 统一功能要求 8 条共 16 项，每项给出实现位置与运行证据（均可按上述方法复核）。文档末尾附**诚实声明**（AI 辅助范围、无抄袭、日志真实性）。
-
-### 演示证据文件说明
-
-| 文件                                                   | 内容                       |
-| ---------------------------------------------------- | ------------------------ |
-| `artifacts/m6_demo/run_20260903_130750_fa21ed.jsonl` | 完整运行日志（含异常恢复链与真实工具调用）    |
-| `artifacts/m6_demo/m6_demo_terminal.txt`             | 该次运行的终端记录（暂停点交互与会话结束摘要）  |
-| `artifacts/m6_demo/report.md`                        | 该次运行产出的分析报告（存档时点为六要素章节版） |
-
-> 注：该报告副本产出于 D-025 修复（图表工具证据回写）之前，故可视化章节写"运行中未记录具体图片文件路径"——这是防编造机制的诚实表现；修复后复跑的报告会直接列出图表路径。
+另可核对 visualizer「列不存在→修正列名→成功」链与最终 `reporter` check 通过事件。
 
 ## 📈 考核要求对应
 
-题目 B 8 条与统一功能要求 8 条的逐项自检（含证据位置）见 **[Self\_Check.md](Self_Check.md)**。
+考核要求与检验入口均内联于本文档：多步规划与工具调用→「系统架构」；状态记录与终止→检验 6；报告产出→检验 7；运行记录→检验 8；异常处理→检验 9；可配置→「配置」表；可复现→「快速开始」。
 
 ## ⚠️ 已知限制
 
@@ -326,11 +300,11 @@ Get-Content artifacts\m6_demo\run_20260903_130750_fa21ed.jsonl |
 
 - **完整代码**：本仓库（密钥仅在本机 `.env`，已排除提交）
 - **README**：本文档
-- **运行记录**：`logs/run_*.jsonl`——完整演示会话 `run_20260903_130750_fa21ed.jsonl`（80 事件，含工具报错→修复重跑、非平稳→差分两条异常恢复链）；随仓库提交的副本在 `artifacts/m6_demo/`（运行日志 + 终端记录 + 演示报告）
+- **运行记录**：`logs/run_*.jsonl`（自动生成，不入库；含工具报错→修复重跑、非平稳→差分等异常恢复链，完成一次在线运行即可复现）
 - **技术报告素材**：
-  - 系统架构与设计取舍：本文档「系统架构」+ [Decision\_Log.md](Decision_Log.md)（D-017\~D-025 记录编排、checkpointer 死锁根因、中断机制、提供方切换、工具证据强制检查等真实决策链）
-  - 失败案例：D-020 子图 checkpoint 死锁（五组对照实验定位）、D-016 IDE 缓冲区覆盖复发、M6 演示运行中的统计假设不满足→差分恢复链
-  - 升级方向：[FUTURE\_UPGRADES.md](FUTURE_UPGRADES.md)（六项，含 df 回写 Leader 审核）
+  - 系统架构与设计取舍：本文档「系统架构」章节与源码注释中的决策编号（D-xxx）
+  - 失败案例：子图 checkpoint 死锁（五组对照实验定位）、IDE 缓冲区覆盖复发、M6 演示运行中的统计假设不满足→差分恢复链
+  - 升级方向：[FUTURE\_UPGRADES.md](FUTURE_UPGRADES.md)（含报告 Worker 化、df 回写 Leader 审核）
 
 ## 📄 许可证
 
@@ -338,5 +312,5 @@ MIT License。示例数据来自 Our World in Data（CC BY 4.0），见 [example
 
 ***
 
-**文档版本**: 2.1.0（M6：新增「人工检验指南」验收手册）
-**最后更新**: 2026-09-03.venv\Scripts\python.exe app.py --data owid-energy-data.csv --hypothesis "2000-2023 年中国可再生能源发展与 GDP 增长的关系"
+**文档版本**: 2.1.1（移除开发过程文档，检验指南改为自跑复现）
+**最后更新**: 2026-09-03

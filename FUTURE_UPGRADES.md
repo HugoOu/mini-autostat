@@ -86,4 +86,4 @@
 1. 任何升级不得改变 Leader-Worker 架构与技术路线，需负责人批准后实施；
 2. 优先填充已预留接口（retrieve / registry provider / checkpointer），
    避免侵入式改造；
-3. 每项升级落地时在 Decision_Log 新增 D 条目并在本文件标注状态。
+3. 每项升级落地时以源码注释中的决策编号（D-xxx）记录依据，并在本文件标注状态。
