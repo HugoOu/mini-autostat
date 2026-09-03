@@ -183,6 +183,114 @@ mini_autostat/
 - `logs/run_<id>.jsonl`：全链路运行记录（时间戳、角色、动作、决策、工具调用及参数、输出/错误、下一步）
 - `checkpoints.sqlite`：状态持久化（支持中断恢复）
 
+## 🧪 人工检验指南（验收手册）
+
+本节既是对外文档，也是逐项检验本产品的人工操作手册。共 10 项检验，前 2 项**无需 LLM API**，第 3 项起为在线检验（消耗 API 调用，运行时长视模型与网络延迟，实测数分钟到数十分钟不等）。
+
+### 检验 1：安装与环境（离线）
+
+```powershell
+git clone <repo-url>; cd mini_autostat
+python -m venv .venv
+.venv\Scripts\pip install -r requirements.txt
+```
+
+**预期**：依赖安装成功，无报错。`requirements.txt` 为全部运行依赖（langgraph、langchain、pandas、statsmodels、matplotlib 等）。
+
+### 检验 2：离线测试套件（离线，约 1 分钟）
+
+```powershell
+.venv\Scripts\python.exe -m pytest -q -o addopts="" --rootdir=. tests
+```
+
+**预期**：`36 passed`。覆盖 M1–M6 各层：状态机、工具校验、sync 确定性 QC（含 D-024 零工具证据打回、D-025 图表证据回写）、报告校验、图编译与预算。（`-o addopts=""` 用于隔离本机全局 pyproject 的 pytest 配置泄漏；干净环境可直接 `.venv\Scripts\python.exe -m pytest -q tests`。）
+
+### 检验 3：一条命令运行（在线，快速小数据）
+
+```powershell
+.venv\Scripts\python.exe app.py --data examples\renewable_energy_gdp.csv --max-turns 6 `
+    --hypothesis "对比中美两国 2000-2023 年可再生能源占比与 GDP 的描述统计"
+```
+
+**预期**：
+1. 启动即打印 `[cli] run_id=<时间戳> max_turns=6 retriever=null data=examples\...`；
+2. 交互暂停点协议出现（见检验 4），全部回车则自动运行；
+3. 结束打印 `===== 会话结束 =====`，各 Worker 步骤带 `[ok]` 状态，随后出现 `report : outputs\report.md`；
+4. `outputs\report.md` 存在且含六要素章节；`outputs\figures\` 出现 PNG；
+5. `logs\run_<同 run_id>.jsonl` 生成。
+
+### 检验 4：两类交互暂停点（在线）
+
+运行任意一次（如检验 3），在暂停点做以下操作：
+
+| 步骤 | 操作 | 预期行为 |
+|------|------|---------|
+| 中断点（team 每轮执行前） | 输入任意文本，如 `请额外关注 2020 年疫情年的异常值` | 打印 `…已注入新指令，Leader 将重规划`，后续调度体现新指令 |
+| 中断点 | 回车 | 继续执行 |
+| 确认点（Leader FINISH 后） | 输入追加任务，如 `请补充美国同期对比` | 回注 team，Leader 基于已完成工作继续调度（断点续跑） |
+| 确认点 | 回车或 `stop` | 生成报告并结束 |
+
+暂停点协议实现于 `app.py`（中断点=静态 `interrupt_before=["team"]`；确认点=FINISH 后动态 `interrupt`，见 Decision_Log D-022）。
+
+### 检验 5：主动终止不丢成果（在线）
+
+- 在任一**中断点**输入 `stop` → 预期打印 `…已标记终止，收敛至报告`，基于已完成步骤出报告（`stop_reason` 为用户中断）；
+- 或运行中按 **Ctrl+C** → 落在最近 super-step 边界，写入终止标记后收敛报告，已有成果不丢失。
+
+### 检验 6：预算终止（在线）
+
+```powershell
+.venv\Scripts\python.exe app.py --data examples\renewable_energy_gdp.csv --max-turns 2 `
+    --hypothesis "中美 2000-2023 可再生能源占比对比"
+```
+
+**预期**：Leader 调度 2 步后触发硬上限，正常收敛出报告（含已知局限说明），**不会**无限循环。三重终止机制见 `core/state.py` 的 `check_termination`。
+
+### 检验 7：六要素报告核对（在线产出，可离线复核）
+
+打开 `outputs/report.md`，核对六节齐全：**数据说明 / 方法及选择原因 / 结果 / 不确定性 / 限制 / 不应得出的结论**。抽查方法：取报告中一个统计数值（如 Pearson r），在 `logs/run_<id>.jsonl` 中搜索该数值，应能在 modeling_analyst 的 `tool_result` 中找到同值——报告只允许引用真实运行结果（`agents/reporter.py` 的 `validate_report` + 兜底降级保障）。
+
+### 检验 8：全链路运行日志（离线即可）
+
+日志格式 `logs/run_<id>.jsonl`，每行一个事件，字段：`ts / step / actor / action / decision / tool / input_summary / output_summary / error / next`。快速总览：
+
+```powershell
+Get-Content artifacts\m6_demo\run_20260903_130750_fa21ed.jsonl | ForEach-Object {
+    $e = $_ | ConvertFrom-Json
+    "{0,3} {1,-22} {2,-12} {3}" -f $e.step, $e.actor, $e.action, $e.decision }
+```
+
+核对要点：每个 Worker 的 `tool_call`（含真实参数）与 `tool_result`（含真实输出与报错）成对出现；sync 的 `check` 事件记录每步合格性判定。
+
+### 检验 9：异常恢复链（离线，查看已提交证据）
+
+`artifacts/m6_demo/run_20260903_130750_fa21ed.jsonl` 为一次完整真实运行的存档（80 事件）。重点查看第 48–58 行：
+
+```powershell
+Get-Content artifacts\m6_demo\run_20260903_130750_fa21ed.jsonl |
+    Select-Object -Skip 47 -First 11
+```
+
+**预期看到两条完整「失败→检测→恢复→成功」链**：
+1. 事件 48–53：`run_correlation_test`/`run_regression_analysis` 因分析列不存在**报错** → 建模 Worker 检测后改用 `execute_python` 自行派生 `renewable_share`/`gdp_growth` 并**重跑成功**；
+2. 事件 54–57：ADF 检验 `renewable_share` 水平值 p=0.9968 **非平稳** → 一阶差分后 p=0.0233 平稳，格兰杰检验按差分序列执行。
+
+另有 visualizer「列不存在→修正列名→成功」链（事件 62–74）与最终报告产出（`reporter` check 通过，事件 78–79）。
+
+### 检验 10：考核项自检表核对（离线）
+
+打开 [Self_Check.md](Self_Check.md)：题目 B 8 条 + 统一功能要求 8 条共 16 项，每项给出实现位置与运行证据（均可按上述方法复核）。文档末尾附**诚实声明**（AI 辅助范围、无抄袭、日志真实性）。
+
+### 演示证据文件说明
+
+| 文件 | 内容 |
+|------|------|
+| `artifacts/m6_demo/run_20260903_130750_fa21ed.jsonl` | 完整运行日志（含异常恢复链与真实工具调用） |
+| `artifacts/m6_demo/m6_demo_terminal.txt` | 该次运行的终端记录（暂停点交互与会话结束摘要） |
+| `artifacts/m6_demo/report.md` | 该次运行产出的六要素报告 |
+
+> 注：该报告副本产出于 D-025 修复（图表工具证据回写）之前，故可视化章节写"运行中未记录具体图片文件路径"——这是防编造机制的诚实表现；修复后复跑的报告会直接列出图表路径。
+
 ## 📈 考核要求对应
 
 题目 B 8 条与统一功能要求 8 条的逐项自检（含证据位置）见 **[Self_Check.md](Self_Check.md)**。
@@ -212,5 +320,5 @@ MIT License。示例数据来自 Our World in Data（CC BY 4.0），见 [example
 
 ---
 
-**文档版本**: 2.0.0（M6：按实际实现重写，替换实现前设计稿）
+**文档版本**: 2.1.0（M6：新增「人工检验指南」验收手册）
 **最后更新**: 2026-09-03
