@@ -493,16 +493,29 @@ def build_app(
 
     # ---- 控制节点 ----
     def init(state: AnalysisState) -> dict:
-        """入口：登记用户假设与数据路径；按假设检索方法知识注入
-        （T5.3 唯一注入点，provider 由配置决定，空结果则不注入）。"""
+        """入口：登记用户假设与数据路径；注入运行事实与方法知识。
+
+        运行事实注入（D-040）：配置的数据路径**必须**进入共享对话——
+        假设文本通常不含文件名，不注入则 Leader 交接任务为空、Worker
+        只能凭空编造路径（run_20260903_233101 实测 3 连败）。
+        方法知识注入（T5.3 唯一注入点，provider 由配置决定，空则跳过）。"""
+        data_path = state.get("data_path") or config.data_path
         context = build_context_block(retriever,
                                       state.get("current_hypothesis") or "")
-        updates: dict = {"data_path": state.get("data_path") or config.data_path,
-                         "iteration": 0}
+        facts = ("[运行事实]\n"
+                 f"- 数据文件路径：{data_path}（相对项目根目录）。\n"
+                 "  data_preprocessor 调用 load_csv 时必须原样使用该路径，"
+                 "禁止猜测或改写文件名。\n"
+                 f"- 用户假设：{state.get('current_hypothesis') or '(未记录)'}")
         if context:
-            updates["messages"] = [SystemMessage(content=context)]
-            tracer.log("system", "route", decision=f"注入检索知识（{retriever.name}）",
-                       output_summary=_clip(context, 200))
+            facts += "\n\n" + context
+        updates: dict = {"data_path": data_path, "iteration": 0,
+                         "messages": [SystemMessage(content=facts)]}
+        tracer.log("system", "route",
+                   decision=(f"注入运行事实（数据 {data_path}）"
+                             + (f" + 检索知识（{retriever.name}）"
+                                if context else "")),
+                   output_summary=_clip(facts, 200))
         tracer.log("user", "route",
                    input_summary=state.get("current_hypothesis") or "",
                    next_action="进入 supervisor 团队循环")

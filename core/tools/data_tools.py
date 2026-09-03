@@ -43,7 +43,21 @@ def load_csv(path: str) -> str:
     try:
         df = pd.read_csv(path)
     except Exception as e:  # noqa: BLE001 - 错误结构化返回给 Agent
-        return _dumps({"error": f"读取失败: {e}"})
+        # 路径报错必须可自修复（D-040）：附带本会话配置的数据路径，
+        # 否则 Worker 只能继续凭空猜文件名（run_20260903_233101 实测）。
+        hint = ""
+        try:
+            from pathlib import Path as _Path
+
+            from core.config import load_config
+
+            cfg_path = _Path(load_config().data_path)
+            if str(cfg_path) != str(path) and cfg_path.exists():
+                hint = (f"；本会话配置的数据文件是 {cfg_path}，"
+                        "请原样用该路径重试")
+        except Exception:  # 配置不可用时退回原始报错即可
+            pass
+        return _dumps({"error": f"读取失败: {e}{hint}"})
 
     datastore.store_df("raw", df)
     datastore.store_df("current", df)
