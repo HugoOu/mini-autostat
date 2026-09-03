@@ -1,316 +1,209 @@
-# Mini AutoSTAT: 基于 LangGraph 的多智能体统计分析系统
+# Mini AutoSTAT
 
-## 📋 项目概述
+一个基于 **LangGraph + langgraph-supervisor** 的 Leader–Worker 多智能体自动化统计分析系统：接收一条自然语言分析假设与一份 CSV 数据，由 Leader Agent 规划调度四个专职 Worker Agent（数据预处理 / 描述统计 / 统计建模 / 可视化），自动完成数据分析全流程，收敛后产出一份**问题驱动的叙事式分析报告**（含图表与等价文本表格）。
 
-Mini AutoSTAT 是一个基于 **LangGraph + langgraph-supervisor** 构建的问题驱动型多智能体统计分析系统（考核题目 B）。用户以自然语言提出分析假设，系统自动完成：数据体检 → 方法选择 → 统计分析（含受限代码生成与执行）→ 可视化 → 问题驱动的叙事结构报告，全程支持用户中断、追加任务与断点续跑。
+系统**数据无关**：`--data` 可指向任意 CSV 数据集，仓库自带的 OWID 能源数据仅为演示示例（见 [examples/README.md](examples/README.md)）。
 
-以能源领域为例：研究可再生能源发展（`renewables_share_energy`）与经济增长（`gdp`）的关系，数据来自 Our World in Data 公开数据集（示例子集见 `examples/`）。
+---
 
-### 核心特性
+## 功能特性
 
-- **问题驱动分析**：Leader 将自然语言假设拆解为步骤，调度 4 个专业 Worker 逐项完成
-- **两类交互暂停点**：team 执行前可注入新指令/终止；Leader 每轮完工后可追加任务或出报告（动态 `interrupt` + `Command(resume=...)`）
-- **三重终止机制**：全部完成且合格 / `max_turns` 硬上限 / 用户主动停止——避免 Agent 无限循环
-- **双层质量控制**：Leader 提示词内即时打回（最多 2 次）+ sync 节点确定性 JSON 校验，不合格自动回环；Worker 未输出约定 JSON 时从真实工具执行结果确定性降级归档（D-031），杜绝空转误判
-- **叙事结构报告（六要素为内容清单）**：按问题驱动叙事组织——问题与数据 → 分析过程 → 主要发现 → 可靠性 → 局限与适用边界 → 结论；考核六要素（数据说明/方法及选择原因/结果/不确定性/限制/不应得出的结论）确定性嵌入对应章节；图表以 Markdown 图片语法嵌入；LLM 成文 → 确定性校验 → 兜底降级三层保障，内容只引用真实运行结果
-- **CLI 实时进度展示**（D-030）：stream 流式消费工作流事件，实时打印 Leader 调度、Worker 工具调用与交接摘要、质检判定、收敛原因
-- **真实工具调用与代码自修复**：数据处理/统计/可视化均为原生 Python 工具；建模 Worker 可生成 pandas/statsmodels 代码在受限子进程中执行，报错自动修复（最多 `max_repair_rounds` 轮）
-- **多模态兼容**：每张图表附带等价文本表格（坐标轴、数据范围、统计摘要），纯文本环境可用
-- **图表全英文渲染**（D-032）：PNG 内标题/轴/图例一律英文，中文标题确定性回退为 `"{y} vs {x}"`，规避中文字体渲染问题
-- **全链路记录**：每个节点的决策、工具调用、输出、错误逐行写入 `logs/run_<id>.jsonl`
-- **RAG 预留接口**：`BaseRetriever` 抽象 + 工厂注册，内置静态方法目录占位，未来接入真实向量检索零改动工作流
+- **Leader–Worker 编排**：Leader（规划/质检/收敛判断）+ 4 个专职 Worker，工具调用与交接消息全量留痕；
+- **实时 CLI 进度**：stream 模式逐事件转译为 `[调度] / [完成] / [质检] / [收敛] / [报告]` 一行式进度；
+- **两类人工暂停点**：中断点（可终止/注入新指令）与确认点（可追加任务续跑），支持 Ctrl+C 安全收敛；
+- **终止机制**：Leader 判定收敛 + `max_turns` 硬上限 + 用户主动终止，三重保险防无限循环；
+- **结果防编造**：报告只能引用确定性序列化的运行素材；六章节缺失自动校验重试，LLM 全部失败时退回确定性兜底报告；
+- **异常自恢复**：代码报错自修复重试、统计假设不满足时自动差分/换方法、渲染失败自动修正；
+- **模型分层可配置**：Leader / Worker / 报告生成三层模型与思考链独立配置；
+- **状态持久化**：SQLite checkpointer，会话可从检查点恢复（含报告重生成）。
 
-## 🛠 技术栈
+## 系统架构
 
-| 组件    | 技术选型                                    | 说明                                                                                                                          |
-| ----- | --------------------------------------- | --------------------------------------------------------------------------------------------------------------------------- |
-| 编排框架  | LangGraph + langgraph-supervisor        | 外层控制图 + supervisor 子图（Leader-Worker）                                                                                        |
-| LLM   | LangChain ChatOpenAI（OpenAI-compatible） | 任何兼容接口均可；**Leader / Worker 分模型**（D-026）：Leader 质量优先（GLM-5.3-Flash + 思考链），Worker 吞吐优先（DeepSeek-V4-Flash + 无思考链），均经 `.env` 可配；报告生成专属模型（D-039）Qwen3.8-Flash（思考链 + reasoning_effort xhigh，GLM 对报告级长调用间歇性 500） |
-| 状态持久化 | SqliteSaver                             | 断点续跑、中断恢复；升级 PostgresSaver 仅改 `workflows/graph.py` compile 一处                                                               |
-| 数据分析  | Pandas, Statsmodels, SciPy              | 描述统计、相关/回归/格兰杰检验（含假设条件前置检查）                                                                                                 |
-| 可视化   | Matplotlib                              | PNG 输出 + 等价文本表格                                                                                                             |
-| 运行记录  | 自研 RunTracer（jsonl）                     | 每步决策、工具调用、输出、错误、下一步                                                                                                         |
-| 测试    | pytest                                  | 离线冒烟测试 36 项（M1–M6），不调用真实 LLM                                                                                                |
-
-## 🏗 系统架构
-
-```mermaid
-flowchart TD
-    U[用户假设<br>CLI/--hypothesis] --> INIT[init 节点<br>登记假设+RAG 知识注入]
-    INIT --> TEAM["team：supervisor 子图<br>Leader ⇄ 4 Worker 循环"]
-
-    subgraph W [Worker Agents]
-        P[data_preprocessor<br>类型/缺失/异常体检]
-        D[descriptive_analyst<br>描述统计]
-        M[modeling_analyst<br>相关/回归/格兰杰<br>+代码生成执行与自修复]
-        V[visualizer<br>PNG+等价文本表格]
-    end
-    TEAM -.调度.-> W
-
-    TEAM --> SYNC[sync 节点<br>增量解析 Worker JSON<br>确定性校验]
-    SYNC --> GATE{gate：三重终止检查}
-    GATE -- 未完成/QC 打回 --> TEAM
-    GATE -- Leader FINISH --> CP[checkpoint 确认点<br>动态 interrupt]
-    CP -- 用户追加任务 --> TEAM
-    CP -- 确认出报告 --> REPORT[report 节点<br>叙事报告：LLM 成文→校验→兜底]
-    GATE -- 预算/终止标记 --> REPORT
-    REPORT --> ENDx[(outputs/report.md<br>+ logs/run_id.jsonl)]
-
-    SAV[(SqliteSaver<br>checkpoints.sqlite)] -.持久化.- GATE
+```
+用户假设 + CSV
+     │
+     ▼
+init（注入运行事实） → team（Leader 调度 ⇄ 4 个 Worker） → sync（确定性质检）
+     ▲                        │                                 │
+     │      不合格/未覆盖打回  │                                 ▼
+     └──────────── gate（回环判断）◄──────────────────── 汇总归档
+                                      │ Leader FINISH
+                                      ▼
+                          checkpoint（确认点 interrupt）
+                                      │ 用户确认
+                                      ▼
+                          report（LLM 成文 + 校验 + 兜底） → outputs/report.md
 ```
 
-要点：**子图编译时显式** **`checkpointer=False`**（嵌套子图继承父图 checkpointer 会引发 checkpoint 写死锁，见 Decision\_Log D-020）；持久化只在外层图。
+| 角色 | 职责 | 内置工具 |
+|------|------|----------|
+| Leader | 任务分解、调度、质检反馈、收敛判断 | transfer_to_* 交接工具 |
+| data_preprocessor | 数据体检：加载/类型/缺失/异常/筛选 | load_csv 等 5 个数据工具 |
+| descriptive_analyst | 描述统计与分布刻画 | run_describe 等 |
+| modeling_analyst | 相关/回归/格兰杰/平稳性，含生成代码执行 | 统计工具 + execute_python |
+| visualizer | 图表渲染（PNG + 等价文本表格，英文图表） | create_chart |
 
-## 🚀 快速开始
+所有工具经 `core/tools/registry.py` 注册（`native` provider，预留 MCP 接入点）；知识检索经 `knowledge/retriever.py` 工厂（`null`/`static`，预留 RAG 接口）。
 
-### 1. 环境要求
+## 环境要求
 
-- Windows / Linux / macOS，Python 3.11+
-- 任一 OpenAI-compatible LLM API（默认配置指向 OpenCode GLM-5.3-Flash，可用任意兼容服务替换）
+| 项 | 要求 |
+|----|------|
+| 操作系统 | Windows / macOS / Linux（示例命令以 PowerShell 为准） |
+| Python | ≥ 3.11（开发环境 3.11.2） |
+| LLM | 任意 OpenAI-compatible API（默认 OpenCode Go；亦兼容 Moonshot、DeepSeek 官方等） |
+| 网络 | 能访问 LLM API 端点 |
 
-### 2. 安装
+## 安装
 
 ```powershell
-git clone <repo-url>; cd mini_autostat
+# 1. 创建虚拟环境
 python -m venv .venv
-.venv\Scripts\pip install -r requirements.txt   # Linux/macOS: .venv/bin/pip
+
+# 2. 安装依赖
+.\.venv\Scripts\pip.exe install -r requirements.txt
+
+# 3. 配置密钥：复制模板为 .env 并填入真实 API Key（切勿提交 .env）
+Copy-Item .env.example .env
+#   编辑 .env，至少填写 OPENAI_API_KEY
 ```
 
-### 3. 配置
+## 快速开始（一条主命令）
 
 ```powershell
-Copy-Item .env.example .env    # Linux/macOS: cp .env.example .env
-# 编辑 .env 填入 OPENAI_API_KEY 等（见下表；.env 已被 .gitignore 排除）
+.\.venv\Scripts\python.exe app.py
 ```
 
-| 环境变量                                                    | 说明                                                            | 默认                              |
-| ------------------------------------------------------- | ------------------------------------------------------------- | ------------------------------- |
-| `OPENAI_API_KEY`                                        | LLM API 密钥（必填）                                                | 无                               |
-| `OPENAI_BASE_URL`                                       | OpenAI-compatible 接口地址                                        | `https://opencode.ai/zen/go/v1` |
-| `OPENAI_MODEL`                                          | 通用/回退模型名                                                      | `glm-5.3-flash`                 |
-| `OPENAI_LEADER_MODEL`                                   | Leader 专属模型（未设置回退 `OPENAI_MODEL`）                             | 未设置                             |
-| `OPENAI_WORKER_MODEL`                                   | Worker 专属模型（未设置回退 `OPENAI_MODEL`）                             | 未设置                             |
-| `OPENAI_REPORT_MODEL`                                   | 报告生成专属模型（未设置回退 Leader 模型，D-039）                        | `qwen3.8-flash`                 |
-| `OPENAI_REPORT_EXTRA_BODY`                              | 报告生成请求附加字段 JSON（思考链/推理力度，D-039）                       | `{"enable_thinking": true, "reasoning_effort": "xhigh"}` |
-| `OPENAI_LEADER_EXTRA_BODY` / `OPENAI_WORKER_EXTRA_BODY` | 随请求体透传的 JSON 附加字段（如思考链开关 `{"thinking": {"type": "enabled"}}`） | 未设置                             |
-| `OPENAI_TEMPERATURE`                                    | 可选；设置后强制覆盖所有 Agent 的 temperature（部分模型如 kimi-k2.6 仅允许 1）       | 不设置（0.0）                        |
-| `MAX_TURNS` / `MAX_REPAIR_ROUNDS`                       | 运行预算（可被命令行覆盖）                                                 | 12 / 3                          |
+不带参数启动即为完整分析会话：默认加载 `examples/owid-energy-data.csv`，回车使用内置示例假设（中国 2000-2023 可再生能源与 GDP 关系），随后自动执行到收敛并生成报告。
 
-### 4. 一条命令运行
+指定自有数据与假设（推荐）：
 
 ```powershell
-.venv\Scripts\python.exe app.py --data owid-energy-data.csv --hypothesis "2000-2023 年中国可再生能源发展与 GDP 增长的关系"
+.\.venv\Scripts\python.exe app.py --data examples/renewable_energy_gdp.csv --hypothesis "对比中美两国 2000-2023 年可再生能源占比与 GDP 的描述统计"
 ```
 
-交互式输入假设（不传 `--hypothesis` 时提示输入，回车用内置示例）。完整 CLI 参数：
+**会话内交互**：
 
-| 参数                                  | 说明                              | 默认                                                             |
-| ----------------------------------- | ------------------------------- | -------------------------------------------------------------- |
-| `--data`                            | CSV 数据路径                        | `owid-energy-data.csv`                                         |
-| `--hypothesis`                      | 自然语言分析假设                        | 交互输入                                                           |
-| `--max-turns`                       | Leader 调度步数硬上限                  | 12                                                             |
-| `--max-repair-rounds`               | 建模代码自修复最大轮数                     | 3                                                              |
-| `--retriever`                       | 知识检索 provider：`null` / `static` | `null`                                                         |
-| `--model`                           | 覆盖通用模型名                         | `OPENAI_MODEL`                                                 |
-| `--leader-model` / `--worker-model` | 覆盖 Leader/Worker 专属模型名          | `OPENAI_LEADER_MODEL` / `OPENAI_WORKER_MODEL`（未设置回退 `--model`） |
-| `--report-model` | 覆盖报告生成专属模型名 | `OPENAI_REPORT_MODEL`（未设置回退 Leader 模型） |
-| `--output-dir` / `--log-dir`        | 输出/日志目录                         | `outputs` / `logs`                                             |
+| 场景 | 操作 |
+|------|------|
+| 确认点（Leader 每轮 FINISH 后） | 回车 / `stop` = 生成报告结束；输入文本 = 追加任务续跑 |
+| 中断点（质检回环/追加任务轮） | 回车 = 继续；`stop` = 终止并收敛报告；输入文本 = 注入新指令 |
+| 运行中任何时候 | Ctrl+C = 标记终止并安全收敛到报告 |
 
-### 5. 交互暂停点协议与实时进度
+## 配置
 
-CLI 运行全程实时打印工作流进度（stream 流式消费，D-030）：`[调度] Leader → worker：任务`、`· worker：工具名`（工具调用）、`[完成] worker：交接摘要`、`[质检] …→ ok/不合格，打回`、`[系统] …`（打回/完整性反馈）、`[收敛] …`（终止原因）、`[报告] 已生成（约 N 字）`。
+优先级：命令行参数 > `.env` 环境变量 > 内置默认值。
 
-两类暂停点协议：
+**命令行参数**（`python app.py --help`）：
 
-| 暂停点     | 时机                                         | 回车     | `stop`   | 输入其他文本           |
-| ------- | ------------------------------------------ | ------ | -------- | ---------------- |
-| **中断点** | team 首轮**自动继续不打断**（D-033）；QC 回环/追加任务轮执行前询问 | 继续     | 终止并收敛到报告 | 注入新指令，Leader 重规划 |
-| **确认点** | Leader 每轮 FINISH 后                         | 生成报告结束 | 生成报告结束   | 追加任务，基于已完成工作继续   |
+| 参数 | 说明 | 默认 |
+|------|------|------|
+| `--data` | CSV 数据文件路径 | `examples/owid-energy-data.csv` |
+| `--hypothesis` | 分析假设（缺省进入交互输入） | 内置示例 |
+| `--model` | 通用/回退 LLM 模型名 | `OPENAI_MODEL` 或 `glm-5.3-flash` |
+| `--leader-model` / `--worker-model` / `--report-model` | 分角色专属模型 | 依次回退上层 |
+| `--max-turns` | Leader 调度步数硬上限 | `12` |
+| `--max-repair-rounds` | 代码报错自修复最大轮数 | `3` |
+| `--retriever` | 知识检索 provider：`null` / `static` | `null` |
+| `--output-dir` / `--log-dir` | 输出/日志目录 | `outputs` / `logs` |
 
-运行中 `Ctrl+C`：落在最近的 super-step 边界，写入终止标记后收敛到报告，已有成果不丢失。
+**环境变量**（`.env`，完整模板见 [.env.example](.env.example)）：
 
-### 6. 使用示例数据快速演示
+| 变量 | 说明 |
+|------|------|
+| `OPENAI_API_KEY` | **必填**，LLM API 密钥 |
+| `OPENAI_BASE_URL` | OpenAI-compatible 端点 |
+| `OPENAI_MODEL` | 通用模型 |
+| `OPENAI_LEADER_MODEL` / `OPENAI_WORKER_MODEL` / `OPENAI_REPORT_MODEL` | Leader（规划质量优先）/ Worker（吞吐优先）/ 报告生成（长文质量）专属模型 |
+| `OPENAI_LEADER_EXTRA_BODY` / `OPENAI_WORKER_EXTRA_BODY` / `OPENAI_REPORT_EXTRA_BODY` | 随请求体透传的 JSON 附加字段（如思考链开关、`reasoning_effort`） |
+| `MAX_TURNS` / `MAX_REPAIR_ROUNDS` | 运行预算 |
+| `DATA_PATH` | 数据文件路径 |
+| `OPENAI_TEMPERATURE` | 强制覆盖所有调用的 temperature（部分模型仅允许特定值） |
 
-```powershell
-.venv\Scripts\python.exe app.py --data examples\renewable_energy_gdp.csv --max-turns 6 `
-    --hypothesis "对比中美两国 2000-2023 年可再生能源占比与 GDP 的描述统计"
-```
-
-## 📁 目录结构
-
-```
-mini_autostat/
-├── app.py                        # 交互式 CLI 主入口（实时进度 + 两类暂停点 + Ctrl+C 兜底）
-├── requirements.txt              # 依赖清单
-├── .env.example                  # 环境变量模板（复制为 .env）
-├── agents/
-│   ├── leader.py                 # Leader 提示词与 FINISH/打回上限常量
-│   ├── reporter.py               # 叙事报告（六要素为内容清单）：素材收集→LLM 成文→校验→兜底
-│   └── workers/
-│       ├── data_preprocessor.py  # 数据体检 Worker（类型/缺失/异常）
-│       ├── descriptive_analyst.py# 描述统计 Worker
-│       ├── modeling_analyst.py   # 建模推断 Worker（含代码生成+受限执行+自修复）
-│       └── visualizer.py         # 可视化 Worker（PNG+等价文本表格）
-├── core/
-│   ├── config.py                 # 配置系统（.env > 环境变量，CLI 参数优先）
-│   ├── llm.py                    # LLM 客户端单点封装（超时/重试/temperature 覆盖）
-│   ├── state.py                  # AnalysisState（17 字段）+ 三重终止检查
-│   ├── tracer.py                 # 全链路记录器 → logs/run_<id>.jsonl
-│   ├── datastore.py              # 共享工作数据集（raw/current 两级）
-│   └── tools/
-│       ├── registry.py           # 工具注册表（native provider，预留 MCP 接入点）
-│       ├── data_tools.py         # load_csv / check_variable_types / check_missing_values / detect_outliers / select_data
-│       ├── stat_tools.py         # 描述统计 / 相关（自动 Pearson-Spearman）/ 格兰杰（ADF 前置）/ 回归（OLS+诊断）
-│       ├── viz_tools.py          # create_chart（PNG + 等价文本表格）
-│       └── code_tools.py         # execute_python（子进程+超时+静态黑名单）
-├── workflows/
-│   └── graph.py                  # 主图组装：init→team→sync→gate→checkpoint→report
-├── knowledge/
-│   └── retriever.py              # BaseRetriever 抽象 + Null/静态方法目录 + 工厂
-├── examples/
-│   ├── README.md                 # 示例数据来源、许可与提取命令
-│   └── renewable_energy_gdp.csv  # 中美 2000-2023 演示子集（48 行）
-├── tests/                        # pytest 离线冒烟测试（M1–M6，42 项）
-├── scripts/                      # 诊断与验收脚本（stream 实测 / 报告探针 / 断点恢复 / 报告重生成）
-├── logs/                         # 运行日志 run_<id>.jsonl（自动生成，不入库）
-├── outputs/                      # 报告与图表（自动生成，不入库）
-│   ├── report.md                 # 问题驱动叙事报告（含六要素内容）
-│   └── figures/*.png             # 图表
-└── FUTURE_UPGRADES.md            # 升级方向清单（报告 Worker 化/RAG/PostgresSaver/MCP 等）
-```
-
-## 📥 输入与输出
+## 输入与输出格式
 
 **输入**
 
-- 自然语言分析假设（CLI 交互或 `--hypothesis`）
-- CSV 数据文件（默认 `owid-energy-data.csv`，OWID 能源数据集，需含所分析列）
+- **分析假设**：自然语言字符串（`--hypothesis` 或启动后交互输入）；
+- **数据**：任意 CSV 文件。首次使用建议至少包含假设中提到的列；系统会先做数据体检（类型/缺失/异常值），按假设筛选工作集。示例数据见 [examples/README.md](examples/README.md)。
 
-**输出**
+**输出**（均在运行结束时打印路径）
 
-- `outputs/report.md`：问题驱动叙事报告（问题与数据 → 分析过程 → 主要发现 → 可靠性 → 局限与适用边界 → 结论；LLM 成文，LLM 故障时自动降级为确定性兜底版并显式标注）
-- `outputs/figures/*.png`：图表（每张附带等价文本表格）
-- `logs/run_<id>.jsonl`：全链路运行记录（时间戳、角色、动作、决策、工具调用及参数、输出/错误、下一步）
-- `checkpoints.sqlite`：状态持久化（支持中断恢复）
+| 文件 | 格式 | 说明 |
+|------|------|------|
+| `outputs/report.md` | Markdown | 问题驱动叙事报告：问题与数据 → 分析过程 → 主要发现 → 可靠性 → 局限与适用边界 → 结论（含「不应得出的结论」小节）；图表以 `![](figures/xxx.png)` 相对路径嵌入 |
+| `outputs/figures/*.png` | PNG | 每张图对应一条等价文本表格（随状态归档），图表文字全英文 |
+| `logs/run_<id>.jsonl` | JSONL | 全链路事件：`ts / step / actor / action / decision / tool / input_summary / output_summary / error / next`，含每次工具调用的真实参数与输出 |
+| `checkpoints.sqlite` | SQLite | LangGraph 检查点，支持中断恢复与报告重生成 |
 
-## 🧪 人工检验指南（验收手册）
+## 目录结构
 
-本节既是对外文档，也是逐项检验本产品的人工操作手册。共 10 项检验，前 2 项**无需 LLM API**，第 3 项起为在线检验（消耗 API 调用，运行时长视模型与网络延迟，实测数分钟到数十分钟不等）。
-
-### 检验 1：安装与环境（离线）
-
-```powershell
-git clone <repo-url>; cd mini_autostat
-python -m venv .venv
-.venv\Scripts\pip install -r requirements.txt
+```
+mini_autostat/
+├── app.py                        # CLI 入口：stream 实时进度 + 两类暂停点
+├── core/
+│   ├── config.py                 # 配置（CLI > env > 默认）
+│   ├── llm.py                    # ChatOpenAI 封装（分角色模型/思考链）
+│   ├── state.py                  # AnalysisState（共享状态）+ 终止机制
+│   ├── tracer.py                 # JSONL 运行记录器
+│   └── tools/
+│       ├── registry.py           # 工具注册表（native provider，预留 MCP）
+│       ├── data_tools.py         # 加载/类型/缺失/异常/筛选
+│       ├── stat_tools.py         # 描述统计/相关/格兰杰/回归（OLS+诊断）
+│       ├── viz_tools.py          # create_chart（PNG + 等价文本表格）
+│       └── code_tools.py         # execute_python（子进程+超时+静态黑名单）
+├── agents/
+│   ├── leader.py                 # Leader（RAG/Pandas 助手，规划与质检）
+│   ├── reporter.py               # 报告生成（素材序列化 + LLM 成文 + 校验 + 兜底）
+│   └── workers/                  # 4 个专职 Worker（create_react_agent）
+├── workflows/
+│   └── graph.py                  # 主图组装 init→team→sync→gate→checkpoint→report
+├── knowledge/
+│   └── retriever.py              # 检索工厂（null/static，预留 RAG）
+├── examples/
+│   ├── README.md                 # 示例数据来源、许可与提取命令
+│   ├── renewable_energy_gdp.csv  # 中美 2000-2023 演示子集（48 行）
+│   └── owid-energy-data.csv      # 完整 OWID 能源数据集（23,377 行 × 130 列）
+├── tests/                        # pytest 离线冒烟测试（M1–M6，42 项）
+├── scripts/                      # 诊断与运维脚本（报告探针/断点恢复/重生成等）
+├── logs/                         # 运行日志（自动生成，不入库）
+├── outputs/                      # 报告与图表（自动生成，不入库）
+├── requirements.txt
+├── .env.example                  # 环境变量模板（复制为 .env 使用）
+└── FUTURE_UPGRADES.md            # 升级方向清单
 ```
 
-**预期**：依赖安装成功，无报错。`requirements.txt` 为全部运行依赖（langgraph、langchain、pandas、statsmodels、matplotlib 等）。
-
-### 检验 2：离线测试套件（离线，约 1 分钟）
+## 测试
 
 ```powershell
-.venv\Scripts\python.exe -m pytest -q -o addopts="" --rootdir=. tests
+# 离线回归（42 项，不调用 LLM）
+.\.venv\Scripts\python.exe -m pytest tests -q
 ```
 
-**预期**：`38 passed`。覆盖 M1–M6 各层：状态机、工具校验、sync 确定性 QC（含 D-024 零工具证据打回、D-025 图表证据回写、D-027 调度完整性/绘图禁令）、报告校验、图编译与预算。（`-o addopts=""` 用于隔离本机全局 pyproject 的 pytest 配置泄漏；干净环境可直接 `.venv\Scripts\python.exe -m pytest -q tests`。）
-
-### 检验 3：一条命令运行（在线，快速小数据）
+端到端在线验收可用小数据集快速验证：
 
 ```powershell
-.venv\Scripts\python.exe app.py --data examples\renewable_energy_gdp.csv --max-turns 6 `
-    --hypothesis "对比中美两国 2000-2023 年可再生能源占比与 GDP 的描述统计"
+.\.venv\Scripts\python.exe app.py --data examples/renewable_energy_gdp.csv --max-turns 6 --hypothesis "对比中美两国 2000-2023 年可再生能源占比与 GDP 的描述统计"
 ```
 
-**预期**：
+## 已知限制
 
-1. 启动即打印 `[cli] run_id=<时间戳> max_turns=6 retriever=null data=examples\...`，随后**直接开始执行**（首轮中断点自动继续，D-033），不再等待输入；
-2. 运行过程实时打印工作流进度：`[调度] Leader → …`、`· worker：工具名`、`[完成] …`、`[质检] …`、`[收敛] …`、`[报告] 已生成（约 N 字）`（见「交互暂停点协议与实时进度」节）；
-3. 交互暂停点协议出现（见检验 4），全部回车则自动运行；
-4. 结束打印 `===== 会话结束 =====`，各 Worker 步骤带 `[ok]` 状态，随后出现 `report : outputs\report.md`；
-5. `outputs\report.md` 存在且含六叙事章节；`outputs\figures\` 出现 PNG（图表内文字全英文，D-032）；
-6. `logs\run_<同 run_id>.jsonl` 生成。
-
-### 检验 4：两类交互暂停点（在线）
-
-运行任意一次（如检验 3），在暂停点做以下操作：
-
-| 步骤                   | 操作                             | 预期行为                               |
-| -------------------- | ------------------------------ | ---------------------------------- |
-| 中断点（team 每轮执行前）      | 输入任意文本，如 `请额外关注 2020 年疫情年的异常值` | 打印 `…已注入新指令，Leader 将重规划`，后续调度体现新指令 |
-| 中断点                  | 回车                             | 继续执行                               |
-| 确认点（Leader FINISH 后） | 输入追加任务，如 `请补充美国同期对比`           | 回注 team，Leader 基于已完成工作继续调度（断点续跑）   |
-| 确认点                  | 回车或 `stop`                     | 生成报告并结束                            |
-
-暂停点协议实现于 `app.py`（中断点=静态 `interrupt_before=["team"]`；确认点=FINISH 后动态 `interrupt`，见 Decision\_Log D-022）。
-
-### 检验 5：主动终止不丢成果（在线）
-
-- 在任一**中断点**输入 `stop` → 预期打印 `…已标记终止，收敛至报告`，基于已完成步骤出报告（`stop_reason` 为用户中断）；
-- 或运行中按 **Ctrl+C** → 落在最近 super-step 边界，写入终止标记后收敛报告，已有成果不丢失。
-
-### 检验 6：预算终止（在线）
-
-```powershell
-.venv\Scripts\python.exe app.py --data examples\renewable_energy_gdp.csv --max-turns 2 `
-    --hypothesis "中美 2000-2023 可再生能源占比对比"
-```
-
-**预期**：Leader 调度 2 步后触发硬上限，正常收敛出报告（含已知局限说明），**不会**无限循环。三重终止机制见 `core/state.py` 的 `check_termination`。
-
-### 检验 7：叙事报告核对（在线产出，可离线复核）
-
-打开 `outputs/report.md`，核对六个叙事章节齐全：**问题与数据 / 分析过程 / 主要发现 / 可靠性 / 局限与适用边界 / 结论**（含「不应得出的结论」小节）；六要素内容分别嵌入对应章节（数据说明→问题与数据；方法及选择原因→分析过程；结果→主要发现；不确定性→可靠性；限制→局限与适用边界）；图表以 `![](路径)` Markdown 图片语法嵌入。抽查方法：取报告中一个统计数值（如 Pearson r），在 `logs/run_<id>.jsonl` 中搜索该数值，应能在 modeling\_analyst 的 `tool_result` 中找到同值——报告只允许引用真实运行结果（`agents/reporter.py` 的 `validate_report` + 兜底降级保障）。
-
-### 检验 8：全链路运行日志（需一次本地运行，无需 LLM 调用）
-
-日志格式 `logs/run_<id>.jsonl`，每行一个事件，字段：`ts / step / actor / action / decision / tool / input_summary / output_summary / error / next`。快速总览：
-
-```powershell
-Get-Content logs\run_<id>.jsonl | ForEach-Object {
-    $e = $_ | ConvertFrom-Json
-    "{0,3} {1,-22} {2,-12} {3}" -f $e.step, $e.actor, $e.action, $e.decision }
-```
-
-核对要点：每个 Worker 的 `tool_call`（含真实参数）与 `tool_result`（含真实输出与报错）成对出现；sync 的 `check` 事件记录每步合格性判定。
-
-### 检验 9：异常恢复链（在线复跑后离线查看）
-
-运行记录不入库（`logs/` 已被 .gitignore 排除），请在本地完成至少一次完整在线运行后查看 `logs/run_<id>.jsonl`。以下两条「失败→检测→恢复→成功」链为此前真实运行中验证过的模式，复跑时可在日志中搜索对应事件：
-
-1. **工具报错→自修复**：`run_correlation_test`/`run_regression_analysis` 因分析列不存在报错 → 建模 Worker 改用 `execute_python` 自行派生所需列并重跑成功（搜索 `tool_error`）；
-2. **统计假设不满足→调整**：ADF 检验水平值序列非平稳 → 一阶差分后平稳，格兰杰检验按差分序列执行（搜索 `ADF`）。
-
-另可核对 visualizer「列不存在→修正列名→成功」链与最终 `reporter` check 通过事件。
-
-## 📈 考核要求对应
-
-考核要求与检验入口均内联于本文档：多步规划与工具调用→「系统架构」；状态记录与终止→检验 6；报告产出→检验 7；运行记录→检验 8；异常处理→检验 9；可配置→「配置」表；可复现→「快速开始」。
-
-## ⚠️ 已知限制
-
-1. **中断粒度为「轮之间」**：同一 team 轮次内部（单个 Worker 执行中）不可暂停；运行中 Ctrl+C 只能在 super-step 边界收敛，不保留"半成品"现场。
-2. **单工作数据集**：工具维护全局 `current` 数据集，多国对比时后一国子集会覆盖前一国（可从 `raw` 重建）；并行 `load_csv`/`select_data` 曾出现覆盖副作用，已由调度顺序约束缓解。
-3. **RAG 为占位实现**：`static` provider 是关键词匹配的内置方法目录，非向量检索；真实 RAG 按 `FUTURE_UPGRADES.md` U-2 升级，工作流零改动。
+1. **中断粒度为「轮之间」**：单个 Worker 执行中不可暂停；Ctrl+C 在 super-step 边界收敛，不保留“半成品”现场。
+2. **单工作数据集**：工具维护全局 `current` 数据集，多数据集对比时后者覆盖前者（可从 `raw` 重建）。
+3. **RAG 为占位实现**：`static` provider 是关键词匹配的内置方法目录，非向量检索；真实 RAG 按 [FUTURE_UPGRADES.md](FUTURE_UPGRADES.md) U-2 升级，工作流零改动。
 4. **代码执行安全边界为 demo 级**：子进程 + 超时 + 静态黑名单，非沙箱级隔离，不应处理不可信输入。
-5. **报告内容受素材约束**：报告只引用 `collect_materials` 序列化的真实运行结果，素材未记录的项写"（运行中未记录）"——防编造是特性也是表达上的限制。
-6. **模型差异**：kimi-k2.6 仅允许 temperature=1（通过 `OPENAI_TEMPERATURE=1` 适配），输出确定性低于 temperature=0 的 GLM 配置。
+5. **报告内容受素材约束**：报告只引用真实运行结果，素材未记录的项写“（运行中未记录）”；LLM 不可用时退回确定性兜底报告（显式标注）。
+6. **提供方稳定性**：GLM 系列对报告级长调用偶发 HTTP 500，已通过报告专属模型分层重试缓解（报告生成默认 Qwen3.8-Flash）。
 
-## 📚 提交材料索引
+## 升级方向
 
-- **完整代码**：本仓库（密钥仅在本机 `.env`，已排除提交）
-- **README**：本文档
-- **运行记录**：`logs/run_*.jsonl`（自动生成，不入库；含工具报错→修复重跑、非平稳→差分等异常恢复链，完成一次在线运行即可复现）
-- **技术报告素材**：
-  - 系统架构与设计取舍：本文档「系统架构」章节与源码注释中的决策编号（D-xxx）
-  - 失败案例：子图 checkpoint 死锁（五组对照实验定位）、IDE 缓冲区覆盖复发、M6 演示运行中的统计假设不满足→差分恢复链
-  - 升级方向：[FUTURE\_UPGRADES.md](FUTURE_UPGRADES.md)（含报告 Worker 化、df 回写 Leader 审核）
+见 [FUTURE_UPGRADES.md](FUTURE_UPGRADES.md)：报告撰写 Worker 化、df 回写 Leader 审核、RAG 统计方法目录、方法评议 Agent、工具合成沉淀、MCP 动态接入、PostgresSaver 等七项，均不改变现有架构。
 
-## 📄 许可证
+## 许可证
 
-MIT License。示例数据来自 Our World in Data（CC BY 4.0），见 [examples/README.md](examples/README.md)。
+MIT License。示例数据来自 [Our World in Data](https://github.com/owid/energy-data)（CC BY 4.0），见 [examples/README.md](examples/README.md)。
 
-***
+---
 
-**文档版本**: 2.1.1（移除开发过程文档，检验指南改为自跑复现）
+**文档版本**: 3.0.0（重写为通用标准格式）
 **最后更新**: 2026-09-03
