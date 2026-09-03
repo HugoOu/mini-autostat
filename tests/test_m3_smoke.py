@@ -174,14 +174,20 @@ def test_code_tools():
     }))
     assert blocked["success"] is False and "blocked_patterns" in blocked
 
-    # 4) 图表收集：代码中 savefig 的 PNG 应回收到 outputs/figures
-    fig = _parse(execute_python.invoke({
+    # 4) 绘图禁令（D-027）：生成代码不得自行绘图，须转交 visualizer
+    plot = _parse(execute_python.invoke({
         "code": "import matplotlib.pyplot as plt\n"
                 "plt.plot(df['year'], df['gdp'])\n"
                 "plt.savefig('trend.png')\nprint('saved')",
     }))
-    assert fig["success"] and len(fig["figures"]) == 1
-    assert Path(fig["figures"][0]).exists()
+    assert plot["success"] is False and "blocked_patterns" in plot
+    assert "visualizer" in plot["error"], "应提示图表转交 visualizer"
+
+    # 4b) savefig / seaborn / plotly 同样被禁
+    for snippet in ("fig.savefig('x.png')", "import seaborn as sns",
+                    "import plotly.express as px"):
+        banned = _parse(execute_python.invoke({"code": snippet}))
+        assert banned["success"] is False, snippet
 
 
 def test_registry_full():

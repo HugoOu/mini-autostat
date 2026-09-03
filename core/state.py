@@ -54,6 +54,7 @@ class AnalysisState(TypedDict, total=False):
     synced_msg_count: int             # 消息游标：sync 节点增量解析 Worker 输出
     tool_usage: dict                  # {"worker": 本会话真实工具调用次数}（D-024 工具证据检查）
     remaining_steps: int              # langgraph 1.x ReactAgent 要求的运行时注入字段
+    coverage_challenges: int          # 调度完整性检查已触发次数（D-027，上限 1）
 
     # ---- M5 中断/确认点（D-022）----
     user_directive: str | None        # checkpoint 节点的本轮用户决策：None=出报告，文本=注入新指令

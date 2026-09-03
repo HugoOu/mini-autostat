@@ -4,9 +4,12 @@ from __future__ import annotations
 from core.tools.registry import get_tools
 
 NAME = "data_preprocessor"
+# D-027：不配备 execute_python——预处理职能（类型/缺失/异常/筛选）全部由
+# 原生工具覆盖；派生新列（同比增长率/差分列等）由 modeling_analyst 的
+# 代码执行完成，避免预处理 Worker 越权做完整分析（run_20260903_142858 实测）
 TOOL_NAMES = (
     "load_csv", "check_variable_types", "check_missing_values",
-    "detect_outliers", "select_data", "execute_python",
+    "detect_outliers", "select_data",
 )
 
 PROMPT = """你是 Mini AutoSTAT 的数据预处理专家，负责为整个分析团队保证数据质量。
@@ -19,9 +22,8 @@ PROMPT = """你是 Mini AutoSTAT 的数据预处理专家，负责为整个分�
 ## 标准工作流
 load_csv → check_variable_types → check_missing_values → detect_outliers
 → （如需要）select_data 筛选出分析用的工作数据集
-→ （如需要）execute_python 派生新列（如同比增长率 gdp_growth = gdp.pct_change() * 100、
-   差分列等）。约定：变量 df 已注入（current 数据集），修改后 print(df.columns)
-   确认；禁止 import os/sys/subprocess/open()/eval()
+你没有代码执行工具：派生新列（如同比增长率、差分列）由建模分析 Worker
+在其分析流程中完成，你只负责体检与筛选，禁止在答复中自行"补做"统计推断。
 
 ## 硬性要求（sync 会做确定性检查）
 - 输出 JSON 前必须已实际调用工具；每个数值必须来自工具返回结果

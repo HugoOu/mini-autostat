@@ -1,12 +1,12 @@
 """受限代码执行工具（T3.4，题目 B 第 3 条：自动生成并执行分析代码）。
 
 安全边界（P-006 已确认：子进程 + 超时 + 静态黑名单，非沙箱级）：
-1. 执行前静态扫描黑名单（os/subprocess/eval/open 等），命中即拒绝；
+1. 执行前静态扫描黑名单（os/subprocess/eval/open 等 + 绘图库 D-027），
+   命中即拒绝；
 2. 代码在隔离子进程运行（sys.executable -I），带超时强杀；
 3. 工作数据集 DataStore["current"] 先落盘为 df_input.csv，注入约定变量 df，
    代码通过 print() 输出结果，stdout 被捕获返回；
-4. 运行产生的 PNG 收集回 outputs/figures/；
-5. 失败返回结构化错误（stderr + 修复提示），供建模 Worker 的修复循环使用。
+4. 失败返回结构化错误（stderr + 修复提示），供建模 Worker 的修复循环使用。
 """
 from __future__ import annotations
 
@@ -34,11 +34,17 @@ _BLACKLIST = [
     r"\bgetattr\s*\(", r"\bglobals\s*\(",
 ]
 
+# 绘图禁令（D-027）：全部图表必须经 visualizer 的 create_chart 生成
+# （等价文本表格 + visualizations 状态归档），生成代码不得自行绘图——
+# 绕过 visualizer 的图既无文本表格也无法进入报告（run_20260903_142858 实测）
+_PLOT_BAN = [
+    r"\bimport\s+matplotlib\b", r"\bfrom\s+matplotlib\b", r"\bpyplot\b",
+    r"\bplt\s*\.", r"\.savefig\s*\(", r"\bseaborn\b", r"\bplotly\b",
+]
+
 _HEADER = '''# ---- 执行环境自动注入（Mini AutoSTAT code_tools）----
 import warnings
 warnings.filterwarnings("ignore")
-import matplotlib
-matplotlib.use("Agg")
 import numpy as np
 import pandas as pd
 from scipy import stats
@@ -58,7 +64,7 @@ print("---- OUTPUT BEGIN ----")
 
 def _scan_blacklist(code: str) -> list[str]:
     hits = []
-    for pattern in _BLACKLIST:
+    for pattern in _BLACKLIST + _PLOT_BAN:
         m = re.search(pattern, code)
         if m:
             hits.append(m.group(0))
@@ -79,14 +85,20 @@ def execute_python(code: str, timeout_seconds: int = 60) -> str:
     1) 变量 df 已注入（当前工作数据集，pandas.DataFrame，可能为 None）；
     2) 关键结果必须用 print() 输出；
     3) 禁止 import os/sys/subprocess/open()/eval() 等（黑名单会拒绝执行）；
-    4) 可用库：pandas/numpy/scipy/statsmodels/matplotlib（Agg 后端）。
+    4) 可用库：pandas/numpy/scipy/statsmodels；**禁止绘图**（matplotlib/
+       seaborn/plotly/savefig 均被拒绝）——图表请由 visualizer 通过
+       create_chart 工具生成，以保证等价文本表格与状态归档。
     失败时返回结构化错误供修复循环使用。"""
     hits = _scan_blacklist(code)
     if hits:
+        plot_hit = any(re.search(p, code) for p in _PLOT_BAN)
+        hint = ("图表请由 visualizer 通过 create_chart 工具生成"
+                "（自动附带等价文本表格并写入报告）" if plot_hit else
+                "分析代码请只使用 pandas/numpy/scipy/statsmodels，"
+                "数据通过变量 df 获取")
         return json.dumps({
             "success": False,
-            "error": f"代码包含被禁止的操作: {hits}。分析代码请只使用 pandas/numpy/"
-                     "scipy/statsmodels/matplotlib，数据通过变量 df 获取",
+            "error": f"代码包含被禁止的操作: {hits}。{hint}",
             "blocked_patterns": hits,
         }, ensure_ascii=False)
 
@@ -114,22 +126,12 @@ def execute_python(code: str, timeout_seconds: int = 60) -> str:
                 "stdout": None, "stderr": None,
             }, ensure_ascii=False)
 
-        figures = []
-        fig_dir = workdir.parent / "autostat_figs"  # 生成代码保存的 PNG 收集回 outputs
-        png_dir = Path("outputs/figures")
-        png_dir.mkdir(parents=True, exist_ok=True)
-        for png in workdir.glob("*.png"):
-            dest = png_dir / f"gen_{int(time.time() * 1000) % 10**8}_{png.name}"
-            shutil.copy(png, dest)
-            figures.append(str(dest))
-
         result = {
             "success": success,
             "returncode": proc.returncode,
             "duration_s": duration,
             "stdout": _clip(proc.stdout),
             "stderr": _clip(proc.stderr),
-            "figures": figures,
         }
         if not success:
             result["error"] = "代码运行报错，请阅读 stderr 中的最后一个 Traceback 定位问题"

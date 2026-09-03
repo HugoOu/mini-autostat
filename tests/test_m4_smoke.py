@@ -123,6 +123,43 @@ def test_viz_render_failure_rejected():
     tracer.close()
 
 
+def test_coverage_feedback_rules():
+    """D-027：Leader FINISH 前的调度完整性检查规则。"""
+    from workflows.graph import coverage_feedback
+
+    # 只有预处理完成 → 打回（分析假设需要实质性分析）
+    pre_only = {"completed_steps": [
+        {"step": "数据体检", "worker": "data_preprocessor", "status": "ok",
+         "summary": "ok"}]}
+    fb = coverage_feedback(pre_only)
+    assert fb and "descriptive_analyst" in fb
+
+    # 有分析 Worker 完成 → 放行
+    with_analysis = {**pre_only, "completed_steps": pre_only["completed_steps"] + [
+        {"step": "描述统计", "worker": "descriptive_analyst", "status": "ok",
+         "summary": "ok"}]}
+    assert coverage_feedback(with_analysis) is None
+
+    # 被打回（rejected）的步骤不算完成
+    rejected = {**with_analysis, "completed_steps": [
+        {"step": "描述统计", "worker": "descriptive_analyst",
+         "status": "rejected", "summary": "缺字段"}]}
+    assert coverage_feedback(rejected)
+
+    # 有图表需求单但 visualizer 未执行 → 打回（即使分析已完成）
+    charts_pending = {**with_analysis, "chart_requests": [
+        {"chart_type": "line", "x": "year", "y": "gdp"}]}
+    fb2 = coverage_feedback(charts_pending)
+    assert fb2 and "visualizer" in fb2
+
+    # visualizer 完成后放行
+    charts_done = {**charts_pending, "completed_steps":
+                   with_analysis["completed_steps"] + [
+                       {"step": "渲染", "worker": "visualizer",
+                        "status": "ok", "summary": "ok"}]}
+    assert coverage_feedback(charts_done) is None
+
+
 def test_viz_charts_recovered_from_tool_results():
     """D-025：visualizer 最终消息缺 charts JSON 块时，成功的 create_chart
     工具结果仍应确定性回写 visualizations（M6 演示实测缺口）。"""
@@ -253,6 +290,7 @@ if __name__ == "__main__":
         test_tool_calls_logged_to_tracer,
         test_process_new_messages_rejection_flow,
         test_chart_request_normalization,
+        test_coverage_feedback_rules,
         test_graph_compiles,
         test_invoke_budget,
     ]

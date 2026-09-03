@@ -83,6 +83,34 @@ def pending_rejections(state: AnalysisState) -> list[str]:
     return [w for w, n in counts.items() if 0 < n < MAX_REJECTIONS]
 
 
+# 分析型 Worker（D-027 调度完整性检查用）：纯预处理会话不足以回答分析假设
+_ANALYSIS_WORKERS = ("descriptive_analyst", "modeling_analyst")
+
+
+def coverage_feedback(state: AnalysisState) -> str | None:
+    """Leader FINISH 前的调度完整性检查（D-027，确定性规则）。
+
+    返回打回反馈文案（需继续调度）或 None（放行）。背景：Leader 曾在
+    完整分析假设下只调度 data_preprocessor 就收敛（run_20260903_142858），
+    报告因此既无统计结果也无图表。两条规则：
+    1. 有图表需求单但 visualizer 无合格步骤 → 图表尚未执行；
+    2. 没有任何分析 Worker（descriptive/modeling）完成 → 纯预处理会话。
+    每会话最多打回 1 次（coverage_challenges），二次 FINISH 直接放行
+    （尊重 Leader 的明确判断，避免死循环）。
+    """
+    completed = state.get("completed_steps") or []
+    done = {s.get("worker") for s in completed if s.get("status") == "ok"}
+    if state.get("chart_requests") and "visualizer" not in done:
+        return ("[系统] 已有图表需求单但 visualizer 尚未执行任何合格步骤。"
+                "请先调度 visualizer 渲染图表，再输出 FINISH。")
+    if not (done & set(_ANALYSIS_WORKERS)):
+        return ("[系统] 目前只有 data_preprocessor 完成了数据体检，还没有任何"
+                "描述统计或建模分析步骤。分析假设需要实质性统计分析：请继续"
+                "调度 descriptive_analyst / modeling_analyst 完成分析后再 FINISH；"
+                "若该假设确实只需数据体检，请明确说明理由后再次 FINISH。")
+    return None
+
+
 def chart_request(r: dict, requester: str) -> dict:
     """规范化一条图表需求单（D-007 协作载体）。"""
     return {"requester": requester, **{k: r.get(k) for k in
@@ -354,6 +382,17 @@ def build_app(
                         "调度 data_preprocessor 开始执行。"))]}
 
         if not should_stop:
+            # 调度完整性检查（D-027）：防止 Leader 只调度预处理就收敛。
+            # 仅在自然 FINISH 分支生效——预算耗尽/用户停止不challenge。
+            challenges = state.get("coverage_challenges") or 0
+            feedback = coverage_feedback(state)
+            if feedback and challenges < 1 and loops < 3:
+                tracer.log("leader", "replan",
+                           decision="调度完整性检查未通过，打回 Leader 继续调度"
+                                    "（D-027）")
+                return {"outer_loops": loops + 1, "iteration": iteration,
+                        "coverage_challenges": challenges + 1,
+                        "messages": [SystemMessage(content=feedback)]}
             should_stop, reason = True, (
                 state.get("stop_reason")
                 or "所有计划步骤完成且合格，Leader 已确认 FINISH")

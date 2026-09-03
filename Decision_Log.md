@@ -227,6 +227,16 @@
 - **验证**：离线测试 +1（角色模型/extra_body 选择与回退、非法 JSON 快速失败），37 项全部通过；在线冒烟确认 glm-5.3-flash（thinking enabled）与 deepseek-v4-flash（thinking disabled）均经 OpenCode Go 网关正常应答。
 - **影响范围**：`core/config.py`、`core/llm.py`、`agents/workers/__init__.py`、`agents/reporter.py`、`workflows/graph.py`、README、Self_Check；架构零改动（get_llm 单点封装原则保持）。
 
+### D-027 | 2026-09-03 | 调度完整性检查 + Worker 工具边界裁剪 + 绘图禁令（负责人确认后实施）
+- **背景**：负责人 14:28 的验证运行（run_20260903_142858_81360a）暴露三层问题：① Leader（kimi temp=1）在完整分析假设下只调度了 data_preprocessor 就 FINISH，报告既无统计结果也无图表；② data_preprocessor 越权——用 execute_python 做完整分析并用 matplotlib 直接生成 6 张 PNG，绕过 visualizer；③ 绕过 create_chart 的图无等价文本表格、不进 visualizations 状态，报告无法引用（防编造机制如实降级为"运行中未记录"）。
+- **决策**（三项确定性修复，不依赖模型自觉）：
+  1. **调度完整性检查**：gate 在自然 FINISH 分支（预算耗尽/用户停止不触发）调用 `coverage_feedback`——有图表需求单但 visualizer 无合格步骤，或没有任何分析 Worker（descriptive/modeling）完成 → 打回 Leader 继续调度；每会话最多 1 次（`coverage_challenges` 字段），二次 FINISH 放行避免死循环；
+  2. **工具边界裁剪**：data_preprocessor 移除 execute_python（负责人确认前提：不得影响其预处理职能——类型/缺失/异常/筛选均有原生工具覆盖，派生新列由 modeling_analyst 的代码执行完成）；
+  3. **绘图禁令**：execute_python 静态黑名单加入 matplotlib/pyplot/savefig/seaborn/plotly，命中拒绝并提示"图表请由 visualizer 通过 create_chart 生成"；执行环境头部不再注入 matplotlib，产物中 figures 字段随之移除。
+- **备选方案**：Leader 提示词强化（靠模型自觉，不可靠，弃）；preprocessor 保留受限 execute_python（负责人指出以不影响预处理职能为前提——原生工具已全覆盖，裁剪更干净）。
+- **验证**：新增 4 组离线测试（覆盖检查规则 ×5 断言、绘图禁令 ×4 断言），38 项全部通过。
+- **影响范围**：`workflows/graph.py`、`core/state.py`（+1 字段）、`agents/workers/data_preprocessor.py`、`core/tools/code_tools.py`。
+
 ---
 
 ## 待确认事项
