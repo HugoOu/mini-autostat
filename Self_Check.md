@@ -29,7 +29,7 @@
 | U4 | 结果检查：独立检查/反思环节 | ① sync 节点确定性校验（JSON 可解析、必需字段、image_path、工具证据 D-024）；② gate QC 回环；③ Leader 提示词质量控制；④ 图表工具证据回写（D-025）；⑤ `validate_report` | run_…092821 日志 sync 反馈消息与打回记录；run_…130750 工具证据计数 | ✅ |
 | U5 | 终止机制：明确最大步数/预算/成功/失败退出 | `core/state.py` `check_termination` 三重条件 + `max_turns` 硬上限 + `recursion_limit` 预算（`invoke_budget`）+ 用户 stop/Ctrl+C | M5 验收 `--max-turns 8` 正常收敛；人工检验五以 `--max-turns 2` 验证预算终止 | ✅ |
 | U6 | 异常处理：至少一次真实失败及恢复 | ① 建模代码报错→修复循环（`max_repair_rounds`）；② 格兰杰 ADF 非平稳→差分后重跑；③ LLM 超时→重试→报告兜底 | M6 演示 run_…130750 两条完整链：工具报错→`execute_python` 派生变量重跑（事件 48-53）、ADF 非平稳→差分→重跑（事件 54-57）；M4 会话 12 轮含多次真实修复 | ✅ |
-| U7 | 可配置性：模型/API/预算/数据路径/参数可配置 | `core/config.py`（.env + CLI，CLI 优先）：`--model --max-turns --max-repair-rounds --retriever --data --output-dir --log-dir` | M5 验收用 `--max-turns 8`、演示用不同 `--data`，均生效 | ✅ |
+| U7 | 可配置性：模型/API/预算/数据路径/参数可配置 | `core/config.py`（.env + CLI，CLI 优先）：`--model --leader-model --worker-model --max-turns --max-repair-rounds --retriever --data --output-dir --log-dir`；D-026 Leader/Worker 分模型 + 思考链 extra_body | M5 验收用 `--max-turns 8`、演示用不同 `--data`，均生效 | ✅ |
 | U8 | 可复现性：README 提供安装到运行完整命令，一条主命令启动 | [README.md](README.md)「快速开始」：环境→安装→配置→一条命令；示例数据提取命令可复现 | README + examples/README.md | ✅ |
 
 ## 三、提交材料对照

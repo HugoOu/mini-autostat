@@ -147,7 +147,8 @@ def generate_report(
 
     for attempt in (1, 2):
         try:
-            llm = get_llm(config, temperature=0.2)
+            # 报告为单次调用且质量优先，按 D-026 使用 Leader 角色模型
+            llm = get_llm(config, temperature=0.2, role="leader")
             text = str(llm.invoke(prompt).content).strip()
         except Exception as e:  # 网络/服务端故障 → 直接兜底
             if tracer:

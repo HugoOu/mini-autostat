@@ -18,9 +18,16 @@ from core.config import AppConfig, load_config
 def get_llm(
     config: AppConfig | None = None,
     temperature: float = 0.0,
+    role: str | None = None,
     **kwargs,
 ) -> ChatOpenAI:
-    """获取共享 LLM 客户端（不缓存：各 Agent 可能需要不同的 temperature）。
+    """获取 LLM 客户端（不缓存：各 Agent 可能需要不同的 temperature）。
+
+    role 分模型（D-026）：
+    - role="leader"：取 leader_model（未配置则回退 model）+ leader_extra_body；
+    - role="worker"：取 worker_model（未配置则回退 model）+ worker_extra_body；
+    - role=None：取通用 model，不附加额外请求字段（向后兼容）。
+    报告生成（reporter）为单次调用、质量优先，按约定使用 leader 角色。
 
     timeout/max_retries（D-019）：单次调用 120s 超时 + 4 次重试（M5 验收
     期间提供方延迟曾超过 3 次尝试的 361s 上限，提升至约 600s），
@@ -28,13 +35,31 @@ def get_llm(
 
     temperature 覆盖（D-023）：设置环境变量 OPENAI_TEMPERATURE 后强制
     覆盖所有调用方的 temperature（部分模型如 kimi-k2.6 仅允许 1）。
+
+    extra_body：随请求体透传的附加字段（如 GLM 系列 `{"thinking":
+    {"type": "enabled"/"disabled"}}` 控制思考链），经环境变量
+    OPENAI_LEADER_EXTRA_BODY / OPENAI_WORKER_EXTRA_BODY（JSON）配置。
     """
     cfg = config or load_config()
     env_temp = os.getenv("OPENAI_TEMPERATURE")
     if env_temp is not None:
         temperature = float(env_temp)
+
+    model, extra_body = cfg.model, None
+    if role == "leader":
+        model = cfg.leader_model or cfg.model
+        extra_body = cfg.leader_extra_body
+    elif role == "worker":
+        model = cfg.worker_model or cfg.model
+        extra_body = cfg.worker_extra_body
+
+    if extra_body:
+        merged = dict(kwargs.pop("extra_body", None) or {})
+        merged.update(extra_body)
+        kwargs["extra_body"] = merged
+
     return ChatOpenAI(
-        model=cfg.model,
+        model=model,
         api_key=cfg.api_key,
         base_url=cfg.base_url,
         temperature=temperature,

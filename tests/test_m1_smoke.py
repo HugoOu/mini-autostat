@@ -62,12 +62,48 @@ def test_get_llm_construction():
     assert llm.model_name == cfg.model
 
 
+def test_get_llm_role_models():
+    """D-026：按角色取模型与 extra_body；未配置角色时回退通用模型。"""
+    import os
+
+    from core.config import AppConfig
+    from core.llm import get_llm
+
+    os.environ.pop("OPENAI_TEMPERATURE", None)
+    cfg = AppConfig(api_key="test-key", model="fallback-model",
+                    leader_model="leader-model", worker_model="worker-model",
+                    leader_extra_body={"thinking": {"type": "enabled"}},
+                    worker_extra_body={"thinking": {"type": "disabled"}})
+    assert get_llm(cfg, role="leader").model_name == "leader-model"
+    assert get_llm(cfg, role="worker").model_name == "worker-model"
+    assert get_llm(cfg).model_name == "fallback-model"
+    assert get_llm(cfg, role="leader").extra_body == {"thinking": {"type": "enabled"}}
+    assert get_llm(cfg, role="worker").extra_body == {"thinking": {"type": "disabled"}}
+    assert get_llm(cfg).extra_body in (None, {})
+
+    # 未配置角色模型 → 回退通用模型，且不附加 extra_body
+    plain = AppConfig(api_key="test-key", model="common")
+    assert get_llm(plain, role="leader").model_name == "common"
+    assert get_llm(plain, role="worker").model_name == "common"
+
+    # 非法 JSON extra_body 环境变量应快速失败
+    import pytest
+    os.environ["OPENAI_LEADER_EXTRA_BODY"] = "{bad json"
+    try:
+        with pytest.raises(ValueError):
+            from core.config import _extra_body_from_env
+            _extra_body_from_env("OPENAI_LEADER_EXTRA_BODY")
+    finally:
+        os.environ.pop("OPENAI_LEADER_EXTRA_BODY", None)
+
+
 if __name__ == "__main__":
     for fn in [
         test_config_defaults_and_overrides,
         test_parse_json_block,
         test_tool_registry,
         test_get_llm_construction,
+        test_get_llm_role_models,
     ]:
         fn()
         print(f"PASS  {fn.__name__}")

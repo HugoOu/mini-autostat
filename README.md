@@ -23,7 +23,7 @@ Mini AutoSTAT 是一个基于 **LangGraph + langgraph-supervisor** 构建的问�
 | 组件 | 技术选型 | 说明 |
 |------|----------|------|
 | 编排框架 | LangGraph + langgraph-supervisor | 外层控制图 + supervisor 子图（Leader-Worker） |
-| LLM | LangChain ChatOpenAI（OpenAI-compatible） | 任何兼容接口均可；开发期经 `.env` 切换过 OpenCode GLM-5.3-Flash 与 Moonshot Kimi |
+| LLM | LangChain ChatOpenAI（OpenAI-compatible） | 任何兼容接口均可；**Leader / Worker 分模型**（D-026）：Leader 质量优先（GLM-5.3-Flash + 思考链），Worker 吞吐优先（DeepSeek-V4-Flash + 无思考链），均经 `.env` 可配 |
 | 状态持久化 | SqliteSaver | 断点续跑、中断恢复；升级 PostgresSaver 仅改 `workflows/graph.py` compile 一处 |
 | 数据分析 | Pandas, Statsmodels, SciPy | 描述统计、相关/回归/格兰杰检验（含假设条件前置检查） |
 | 可视化 | Matplotlib | PNG 输出 + 等价文本表格 |
@@ -85,7 +85,10 @@ Copy-Item .env.example .env    # Linux/macOS: cp .env.example .env
 |---------|------|------|
 | `OPENAI_API_KEY` | LLM API 密钥（必填） | 无 |
 | `OPENAI_BASE_URL` | OpenAI-compatible 接口地址 | `https://opencode.ai/zen/go/v1` |
-| `OPENAI_MODEL` | 模型名 | `glm-5.3-flash` |
+| `OPENAI_MODEL` | 通用/回退模型名 | `glm-5.3-flash` |
+| `OPENAI_LEADER_MODEL` | Leader 专属模型（未设置回退 `OPENAI_MODEL`） | 未设置 |
+| `OPENAI_WORKER_MODEL` | Worker 专属模型（未设置回退 `OPENAI_MODEL`） | 未设置 |
+| `OPENAI_LEADER_EXTRA_BODY` / `OPENAI_WORKER_EXTRA_BODY` | 随请求体透传的 JSON 附加字段（如思考链开关 `{"thinking": {"type": "enabled"}}`） | 未设置 |
 | `OPENAI_TEMPERATURE` | 可选；设置后强制覆盖所有 Agent 的 temperature（部分模型如 kimi-k2.6 仅允许 1） | 不设置（0.0） |
 | `MAX_TURNS` / `MAX_REPAIR_ROUNDS` | 运行预算（可被命令行覆盖） | 12 / 3 |
 
@@ -104,7 +107,8 @@ Copy-Item .env.example .env    # Linux/macOS: cp .env.example .env
 | `--max-turns` | Leader 调度步数硬上限 | 12 |
 | `--max-repair-rounds` | 建模代码自修复最大轮数 | 3 |
 | `--retriever` | 知识检索 provider：`null` / `static` | `null` |
-| `--model` | 覆盖 `.env` 中的模型名 | `OPENAI_MODEL` |
+| `--model` | 覆盖通用模型名 | `OPENAI_MODEL` |
+| `--leader-model` / `--worker-model` | 覆盖 Leader/Worker 专属模型名 | `OPENAI_LEADER_MODEL` / `OPENAI_WORKER_MODEL`（未设置回退 `--model`） |
 | `--output-dir` / `--log-dir` | 输出/日志目录 | `outputs` / `logs` |
 
 ### 5. 交互暂停点协议
@@ -159,7 +163,7 @@ mini_autostat/
 │   └── renewable_energy_gdp.csv  # 中美 2000-2023 演示子集（48 行）
 ├── artifacts/
 │   └── m6_demo/                  # M6 演示运行证据副本（jsonl 日志/终端记录/报告）
-├── tests/                        # pytest 离线冒烟测试（M1–M6，36 项）
+├── tests/                        # pytest 离线冒烟测试（M1–M6，37 项）
 ├── scripts/                      # 验收脚本（e2e / M5 确认点 / 组件联调）
 ├── logs/                         # 运行日志 run_<id>.jsonl（自动生成）
 ├── outputs/                      # 报告与图表（自动生成）

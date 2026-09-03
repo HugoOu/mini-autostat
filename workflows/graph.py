@@ -298,7 +298,7 @@ def build_app(
 
     team = create_supervisor(
         agents=workers,
-        model=get_llm(config),
+        model=get_llm(config, role="leader"),
         prompt=build_leader_prompt(config),
         supervisor_name="leader",
         state_schema=AnalysisState,

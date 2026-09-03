@@ -217,6 +217,16 @@
 - **权衡**：选择"从工具证据回写"而非"无 JSON 一律打回"——图表已真实渲染，打回只会浪费轮次重渲染同样的图；证据以工具结果为准与 D-024 的立场一致；
 - **验证**：新增 2 项离线测试（工具证据回写 / JSON 与工具证据去重），36 项全部通过。
 
+### D-026 | 2026-09-03 | Leader / Worker 分模型（负责人指示，助手执行）
+- **背景**：负责人为优化数据分析流程速度，决定 Leader 与 Worker 使用不同 LLM：回到 OpenCode Go 提供方，Leader 用 `glm-5.3-flash`（保持思考链开启，重规划质量优先），Worker 用 `deepseek-v4-flash`（不开启思考链，重执行吞吐）。
+- **决策**：
+  - `core/config.py` 新增 `leader_model` / `worker_model` 与 `leader_extra_body` / `worker_extra_body`（env：`OPENAI_LEADER_MODEL` / `OPENAI_WORKER_MODEL` / `OPENAI_LEADER_EXTRA_BODY` / `OPENAI_WORKER_EXTRA_BODY`，CLI：`--leader-model` / `--worker-model`，均优先于 env；未配置角色时回退通用 `model`，向后兼容）；
+  - `core/llm.py get_llm` 新增 `role` 参数（"leader"/"worker"/None），模型与 extra_body 按角色选取；extra_body 为 JSON 透传字段，思考链开关（GLM 系 `{"thinking": {"type": ...}}`）经 env 配置而非硬编码，规避提供方协议差异；
+  - 调用点归属：Leader supervisor = leader 角色；4 个 Worker = worker 角色；**reporter 使用 leader 角色**（助手自决：单次调用、质量优先，对速度无影响）；
+  - 本地 `.env` 已切换至 OpenCode Go 并按上述配置生效。
+- **验证**：离线测试 +1（角色模型/extra_body 选择与回退、非法 JSON 快速失败），37 项全部通过；在线冒烟确认 glm-5.3-flash（thinking enabled）与 deepseek-v4-flash（thinking disabled）均经 OpenCode Go 网关正常应答。
+- **影响范围**：`core/config.py`、`core/llm.py`、`agents/workers/__init__.py`、`agents/reporter.py`、`workflows/graph.py`、README、Self_Check；架构零改动（get_llm 单点封装原则保持）。
+
 ---
 
 ## 待确认事项

@@ -4,12 +4,14 @@
 
 可配置项包括：
 - LLM 模型名称 / API 地址 / 密钥（D-002：OpenCode Go 提供的 GLM-5.3-Flash）
+- Leader / Worker 分模型（D-026：Leader 重规划质量优先，Worker 重执行吞吐）
 - 运行预算：max_turns（终止机制硬上限）、max_repair_rounds（代码修复轮数）
 - 数据路径与输出目录
 """
 from __future__ import annotations
 
 import argparse
+import json
 import os
 from dataclasses import dataclass
 from pathlib import Path
@@ -28,7 +30,11 @@ class AppConfig:
     """一次分析会话的全部可配置项。"""
 
     # ---- LLM（OpenAI-compatible 接入）----
-    model: str = "glm-5.3-flash"
+    model: str = "glm-5.3-flash"      # 通用/回退模型
+    leader_model: str | None = None   # Leader 专属模型（None=回退 model）
+    worker_model: str | None = None   # Worker 专属模型（None=回退 model）
+    leader_extra_body: dict | None = None   # Leader 请求附加字段（如思考链开关）
+    worker_extra_body: dict | None = None   # Worker 请求附加字段
     base_url: str | None = None
     api_key: str | None = None
     temperature: float = 0.0
@@ -49,7 +55,11 @@ class AppConfig:
 
 def _build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="mini-autostat", description="Mini AutoSTAT CLI")
-    p.add_argument("--model", help="LLM 模型名称（默认取 OPENAI_MODEL）")
+    p.add_argument("--model", help="通用/回退 LLM 模型名（默认取 OPENAI_MODEL）")
+    p.add_argument("--leader-model", help="Leader 专属模型名（默认取 OPENAI_LEADER_MODEL，"
+                                          "未设置则回退 --model）")
+    p.add_argument("--worker-model", help="Worker 专属模型名（默认取 OPENAI_WORKER_MODEL，"
+                                          "未设置则回退 --model）")
     p.add_argument("--max-turns", type=int, help="Leader 调度步数硬上限")
     p.add_argument("--max-repair-rounds", type=int, help="代码修复最大轮数")
     p.add_argument("--retriever", help="知识检索 provider：null/static（默认 null，T5.3）")
@@ -59,12 +69,32 @@ def _build_parser() -> argparse.ArgumentParser:
     return p
 
 
+def _extra_body_from_env(name: str) -> dict | None:
+    """解析 JSON 格式的请求附加字段环境变量；非法 JSON 快速失败。"""
+    raw = os.getenv(name)
+    if not raw:
+        return None
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError as e:
+        raise ValueError(f"环境变量 {name} 不是合法 JSON：{e}") from e
+    if not isinstance(parsed, dict):
+        raise ValueError(f"环境变量 {name} 必须是 JSON 对象")
+    return parsed
+
+
 def load_config(argv: list[str] | None = None) -> AppConfig:
     """解析配置：环境变量打底，命令行参数覆盖。"""
     args = _build_parser().parse_args(argv)
 
     return AppConfig(
         model=args.model or os.getenv("OPENAI_MODEL", AppConfig.model),
+        leader_model=(args.leader_model
+                      or os.getenv("OPENAI_LEADER_MODEL") or None),
+        worker_model=(args.worker_model
+                      or os.getenv("OPENAI_WORKER_MODEL") or None),
+        leader_extra_body=_extra_body_from_env("OPENAI_LEADER_EXTRA_BODY"),
+        worker_extra_body=_extra_body_from_env("OPENAI_WORKER_EXTRA_BODY"),
         base_url=os.getenv("OPENAI_BASE_URL") or None,
         api_key=os.getenv("OPENAI_API_KEY") or None,
         max_turns=args.max_turns or int(os.getenv("MAX_TURNS", AppConfig.max_turns)),

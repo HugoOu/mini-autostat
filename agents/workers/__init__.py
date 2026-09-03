@@ -18,8 +18,8 @@ WORKER_MODULES = (
 
 
 def build_workers(config) -> list:
-    """构建全部 4 个 Worker Agent（共享同一 LLM 客户端与配置）。"""
+    """构建全部 4 个 Worker Agent（共享 Worker 角色 LLM 客户端与配置，D-026）。"""
     from core.llm import get_llm
 
-    llm = get_llm(config)
+    llm = get_llm(config, role="worker")
     return [mod.build(llm, config) for mod in WORKER_MODULES]
