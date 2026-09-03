@@ -8,7 +8,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import numpy as np
 import pandas as pd
 
-DATA = "owid-energy-data.csv"
+DATA = "examples/owid-energy-data.csv"
 CN_COLS = "country,year,gdp,renewables_share_energy,energy_per_gdp"
 
 

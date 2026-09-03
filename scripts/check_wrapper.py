@@ -18,7 +18,7 @@ def main() -> None:
     use_cp = "--with-checkpointer" in sys.argv
     cfg = load_config([])
     ensure_dirs(cfg)
-    cfg.data_path = "owid-energy-data.csv"
+    cfg.data_path = "examples/owid-energy-data.csv"
 
     from langgraph.checkpoint.sqlite import SqliteSaver
 
@@ -33,7 +33,7 @@ def main() -> None:
         t0 = time.time()
         result = app.invoke(
             {"messages": [{"role": "user",
-                           "content": "请加载 owid-energy-data.csv 并筛选 China 2000:2023 "
+                           "content": "请加载 examples/owid-energy-data.csv 并筛选 China 2000:2023 "
                                       "年的 gdp,renewables_share_energy 两列，然后 FINISH。"}],
              "current_hypothesis": "wrapper 诊断"},
             config={"configurable": {"thread_id": tr.run_id},

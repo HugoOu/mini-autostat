@@ -50,7 +50,7 @@ class AppConfig:
     retriever: str = "null"
 
     # ---- 路径 ----
-    data_path: Path = Path("owid-energy-data.csv")
+    data_path: Path = Path("examples/owid-energy-data.csv")
     output_dir: Path = Path("outputs")   # figures/ 与 reports/ 的父目录
     log_dir: Path = Path("logs")         # 全链路运行记录（jsonl）
 

@@ -37,7 +37,7 @@ def main() -> None:
     t0 = time.time()
     result = team.invoke(
         {"messages": [{"role": "user",
-                       "content": "请加载 owid-energy-data.csv 并筛选 China 2000:2023 "
+                       "content": "请加载 examples/owid-energy-data.csv 并筛选 China 2000:2023 "
                                   "年的 gdp,renewables_share_energy 两列。"}]},
         config={"recursion_limit": 40},
     )

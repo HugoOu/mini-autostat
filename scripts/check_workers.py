@@ -16,7 +16,7 @@ from core.tools import register_all_tools  # noqa: E402
 
 TASKS = [
     ("data_preprocessor",
-     "加载 owid-energy-data.csv 做数据体检，然后筛选 China、2000:2023 年、"
+     "加载 examples/owid-energy-data.csv 做数据体检，然后筛选 China、2000:2023 年、"
      "列 gdp,renewables_share_energy,energy_per_gdp 为工作数据集"),
     ("descriptive_analyst",
      "对当前工作数据集的 gdp 与 renewables_share_energy 做描述性统计，"

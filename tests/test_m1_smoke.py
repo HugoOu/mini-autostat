@@ -9,10 +9,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 def test_config_defaults_and_overrides():
     from core.config import load_config
 
-    cfg = load_config(["--max-turns", "5", "--data", "owid-energy-data.csv"])
+    cfg = load_config(["--max-turns", "5",
+                       "--data", "examples/owid-energy-data.csv"])
     assert cfg.max_turns == 5
-    assert cfg.data_path == Path("owid-energy-data.csv")
-    assert cfg.data_path.exists(), "示例数据应存在于项目根目录"
+    assert cfg.data_path == Path("examples/owid-energy-data.csv")
+    assert cfg.data_path.exists(), "示例数据应存在于 examples/ 目录"
     assert cfg.model, "模型名应有默认值"
     assert cfg.max_repair_rounds >= 1
 

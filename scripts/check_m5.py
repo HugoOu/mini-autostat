@@ -1,7 +1,7 @@
 """M5 在线验收（T5.1/T5.2）：确认点追加任务 → 基于已完成工作续跑 → 六要素报告。
 
 流程（模拟 app.py 的确认点交互，D-022）：
-    1. 初始任务：加载 owid-energy-data.csv，筛选中国 2000-2023 的
+    1. 初始任务：加载 examples/owid-energy-data.csv，筛选中国 2000-2023 的
        gdp / renewables_share_energy 做描述统计（第一轮 team，至 FINISH）；
     2. Leader FINISH 后进入 checkpoint 确认点（动态 interrupt）——
        第 1 次确认点：追加任务「对美国同期做同样描述统计并与中国对比」
@@ -21,7 +21,7 @@ from core.config import ensure_dirs, load_config
 from core.tracer import RunTracer
 from workflows.graph import build_app, invoke_budget
 
-INITIAL_TASK = ("请加载 owid-energy-data.csv，筛选中国 2000-2023 年的 "
+INITIAL_TASK = ("请加载 examples/owid-energy-data.csv，筛选中国 2000-2023 年的 "
                 "gdp 与 renewables_share_energy 两列，给出描述统计后 FINISH。")
 NEW_INSTRUCTION = ("补充任务：对美国（United States）同期做同样的描述统计，"
                    "并在结论中与中国对比。")
@@ -31,7 +31,7 @@ HYPOTHESIS = "中国可再生能源发展与经济增长的描述性对比研究
 def main() -> None:
     config = load_config(["--max-turns", "8"])
     ensure_dirs(config)
-    config.data_path = "owid-energy-data.csv"
+    config.data_path = "examples/owid-energy-data.csv"
 
     from langgraph.checkpoint.sqlite import SqliteSaver
     from langgraph.types import Command

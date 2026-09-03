@@ -21,7 +21,7 @@ def main() -> None:
               next_action="调度 data_preprocessor")
         t.log("data_preprocessor", "tool_call",
               tool={"name": "load_csv", "provider": "native",
-                    "args": {"path": "owid-energy-data.csv"}})
+                    "args": {"path": "examples/owid-energy-data.csv"}})
         t.log("data_preprocessor", "tool_result",
               output_summary="读取 221 行 × 128 列；gdp 列缺失 3.2%；"
                              "筛选 2000-2023 年主要经济体后剩 480 行",
