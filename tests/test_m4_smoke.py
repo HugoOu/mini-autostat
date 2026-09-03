@@ -180,9 +180,14 @@ def test_viz_charts_recovered_from_tool_results():
     v = updates["visualizations"][0]
     assert v["image_path"] == "outputs/figures/a.png"
     assert v["title"] == "GDP 趋势" and v["status"] == "ok"
-    # 无 JSON 分类键 → 不产生校验条目，也不打回（真实工作已完成）
-    assert updates["completed_steps"] == []
-    assert "messages" not in updates
+    # D-031：visualizer 有成功工具证据 → 补降级 completed step（D-025 原
+    # 先只回写图表，覆盖检查/终止判定看不到 visualizer）
+    assert len(updates["completed_steps"]) == 1
+    s = updates["completed_steps"][0]
+    assert s["worker"] == "visualizer" and s["status"] == "ok"
+    assert "降级归档" in s["summary"]
+    # 系统反馈告知 Leader 真实归档情况（防"已收到 JSON"幻觉）
+    assert "D-031" in updates["messages"][0].content
     tracer.close()
 
 
@@ -256,6 +261,85 @@ def test_process_new_messages_rejection_flow():
     tracer.close()
 
 
+def test_degraded_archive_preprocessor():
+    """D-031：Worker 有成功工具执行但未输出约定 JSON → 从工具结果
+    确定性降级归档（run_20260903_163256 实测：deepseek 叙述完即结束回合，
+    JSON 缺失且 completed_steps 全程为空，零工作轮次误触发）。"""
+    tracer = _tracer()
+    state = _fresh_state([
+        _Msg("用户假设"),
+        _Msg("", name="leader",
+             tool_calls=[{"name": "transfer_to_data_preprocessor", "args": {}}]),
+        _Msg("", name="data_preprocessor",
+             tool_calls=[{"name": "load_csv", "args": {}}]),
+        _ToolMsg("load_csv", '{"path": "owid-energy-data.csv", "rows": 23377, "cols": 130}'),
+        _Msg("", name="data_preprocessor",
+             tool_calls=[{"name": "select_data", "args": {}}]),
+        _ToolMsg("select_data",
+                 '{"rows": 24, "cols": 130, "columns": ["country", "year", "gdp"]}'),
+        _Msg("", name="data_preprocessor",
+             tool_calls=[{"name": "check_missing_values", "args": {}}]),
+        _ToolMsg("check_missing_values",
+                 '{"rows": 24, "missing_report": [{"column": "gdp", "n_missing": 1, "missing_pct": 4.17}]}'),
+        # 最终消息：叙述句收尾，无 JSON（复现实测行为）
+        _Msg("现在将数据预处理结果回报给 leader：", name="data_preprocessor"),
+    ])
+    updates = process_new_messages(state, tracer)
+
+    steps = updates["completed_steps"]
+    assert len(steps) == 1 and steps[0]["worker"] == "data_preprocessor"
+    assert steps[0]["status"] == "ok" and "降级归档" in steps[0]["summary"]
+    assert updates["data_cleaned"] is True
+    profile = updates["data_profile"]
+    assert "23377" in profile["data_overview"] and "24" in profile["data_overview"]
+    assert any("gdp" in q and "4.2%" in q for q in profile["quality_issues"])
+    assert profile["working_set"]["rows"] == 24
+    # 系统反馈：告知 Leader 真实归档情况，防幻觉
+    assert "D-031" in updates["messages"][0].content
+    assert "不要声称已收到" in updates["messages"][0].content
+    tracer.close()
+
+
+def test_degraded_archive_modeling_text_evidence():
+    """D-031：modeling 的 execute_python stdout 文本（非 JSON）也作为证据。"""
+    tracer = _tracer()
+    state = _fresh_state([
+        _Msg("", name="leader",
+             tool_calls=[{"name": "transfer_to_modeling_analyst", "args": {}}]),
+        _Msg("", name="modeling_analyst",
+             tool_calls=[{"name": "execute_python", "args": {}}]),
+        _ToolMsg("execute_python", "spearman r=0.96, p<0.001"),
+        _Msg("分析完成， transferring back", name="modeling_analyst"),
+    ])
+    updates = process_new_messages(state, tracer)
+
+    steps = updates["completed_steps"]
+    assert len(steps) == 1 and steps[0]["worker"] == "modeling_analyst"
+    assert steps[0]["status"] == "ok"
+    modeling = updates["statistical_results"]["modeling"]
+    assert modeling[0]["source"] == "tool_evidence"
+    assert "r=0.96" in str(modeling[0]["analyses"])
+    tracer.close()
+
+
+def test_degraded_archive_no_evidence_keeps_d024_logic():
+    """D-031：无任何成功工具证据时不降级归档（维持 D-024/零工作逻辑）。"""
+    tracer = _tracer()
+    state = _fresh_state([
+        _Msg("", name="leader",
+             tool_calls=[{"name": "transfer_to_descriptive_analyst", "args": {}}]),
+        _Msg("", name="descriptive_analyst",
+             tool_calls=[{"name": "run_descriptive_stats", "args": {}}]),
+        _ToolMsg("run_descriptive_stats", '{"error": "数据集不存在"}',
+                 status="error"),
+        _Msg("我无法获取数据", name="descriptive_analyst"),
+    ])
+    updates = process_new_messages(state, tracer)
+    assert updates["completed_steps"] == []
+    assert "messages" not in updates
+    tracer.close()
+
+
 def test_chart_request_normalization():
     cr = chart_request({"chart_type": "scatter", "x": "a", "y": "b", "extra": 1}, "modeling_analyst")
     assert cr == {"requester": "modeling_analyst", "chart_type": "scatter",
@@ -287,6 +371,11 @@ if __name__ == "__main__":
         test_process_new_messages_ok,
         test_tool_usage_enforced_without_tools,
         test_viz_render_failure_rejected,
+        test_viz_charts_recovered_from_tool_results,
+        test_viz_tool_evidence_dedup,
+        test_degraded_archive_preprocessor,
+        test_degraded_archive_modeling_text_evidence,
+        test_degraded_archive_no_evidence_keeps_d024_logic,
         test_tool_calls_logged_to_tracer,
         test_process_new_messages_rejection_flow,
         test_chart_request_normalization,

@@ -58,6 +58,27 @@
   一次性 `setup()` 建表。状态定义、工作流逻辑零改动。
 - **状态**：demo 冻结后执行。
 
+## U-7 报告撰写 Worker 化（D-029/D-039 的演进方向）
+
+- **问题**：demo 阶段报告由 `agents/reporter.py` 在图外单次 LLM 调用生成，
+  素材 `collect_materials` 是一次性确定性快照，无法在成文过程中回头补查
+  数据或追问 Worker。中间过渡态（D-039）：报告生成已独立出专属模型配置
+  `report_model`（qwen3.8-flash，思考链 + reasoning_effort xhigh，降级
+  Worker 模型时临时开思考链）——但仍是**图外单次调用**，只是模型解耦。
+- **方案**：把报告生成从"专属模型 + 图外单次调用"升级为专职
+  `report_writer` Worker Agent，纳入 Leader 调度：
+  1. 以 `collect_materials` 为初稿素材，成文中可调用只读工具
+     （如查询 statistical_results、按图表路径回看 text_table）补细节；
+  2. 沿用叙事章节结构（问题与数据→分析过程→主要发现→可靠性→
+     局限与适用边界→结论）与 `validate_report` 确定性校验，
+     校验不过仍走确定性兜底；
+  3. 现有 `report_model`/`report_extra_body` 配置直接复用为该 Worker
+     的模型配置，模型层零改动；
+  4. 确认点交互可让用户对报告提修改意见后由该 Worker 重写。
+- **边界**：报告内容仍只允许来自运行素材（禁止编造数值）的约束不变。
+- **状态**：方向明确，demo 阶段不实现（负责人已确认；D-039 专属模型
+  配置已落地，为本升级预留模型层接口）。
+
 ---
 
 ## 演进原则（沿承合作原则第 1 条）

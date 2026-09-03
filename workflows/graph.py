@@ -111,6 +111,113 @@ def coverage_feedback(state: AnalysisState) -> str | None:
     return None
 
 
+def _last_evidence(evs: list[dict], tool: str) -> dict | None:
+    """D-031：取某工具最后一次成功结果。"""
+    found = [e for e in evs if e["tool"] == tool]
+    return found[-1] if found else None
+
+
+def _degraded_step(worker: str, evs: list[dict]) -> tuple[dict, dict] | None:
+    """D-031：从成功工具结果确定性重构降级步骤（未经 LLM）。
+
+    背景（run_20260903_163256 实测）：deepseek-v4-flash 常在叙述句后
+    直接结束回合（「现在将结果回报给 leader：」→ 无工具调用 → react
+    循环终止），约定的 JSON 结果块从未输出；Leader 还会幻觉「已收到
+    JSON」。sync 原先对这类消息静默忽略，导致 completed_steps 全程
+    为空、零工作轮次误触发、报告素材缺失。
+
+    原则与 D-025 一致：真实工具执行结果是确定性证据，执行不可抵赖；
+    归档时显式标注降级来源。无任何成功工具证据则返回 None（维持
+    D-024 打回/零工作轮次逻辑处理）。
+
+    返回 (步骤条目, 状态增量)；状态增量支持 statistical_results /
+    chart_requests / data_cleaned / data_profile 键。
+    """
+    if not evs:
+        return None
+    tools_called = sorted({e["tool"] for e in evs})
+    summary_head = (f"降级归档（D-031）：Worker 未输出约定 JSON 结果块，"
+                    f"以下内容确定性重构自其真实工具执行结果"
+                    f"（{', '.join(tools_called)}）。")
+
+    if worker == "data_preprocessor":
+        load = _last_evidence(evs, "load_csv")
+        sel = _last_evidence(evs, "select_data")
+        if not (load or sel):
+            return None
+        overview = []
+        if load and load["out"]:
+            o = load["out"]
+            overview.append(f"原始数据 {o.get('path', '?')}：{o.get('rows')} 行"
+                            f" {o.get('cols')} 列")
+        working_set = None
+        if sel and sel["out"]:
+            s = sel["out"]
+            working_set = {"rows": s.get("rows"), "columns":
+                           (s.get("columns") or [])[:20]}
+            overview.append(f"工作集筛选：{s.get('rows')} 行"
+                            f"（{(s.get('columns') or [])[:8]}...）")
+        quality = []
+        miss = _last_evidence(evs, "check_missing_values")
+        if miss and miss["out"]:
+            quality += [f"{m.get('column')} 缺失 {m.get('missing_pct', 0):.1f}%"
+                        for m in (miss["out"].get("missing_report") or [])
+                        if m.get("n_missing")]
+        outl = _last_evidence(evs, "detect_outliers")
+        if outl and outl["out"]:
+            quality += [f"{m.get('column')} 检出 {m.get('n')} 个异常值（IQR）"
+                        for m in (outl["out"].get("outlier_report") or [])]
+        return (
+            {"step": "数据预处理", "worker": worker, "status": "ok",
+             "summary": summary_head + "；".join(overview)[:200]},
+            {"data_cleaned": True,
+             "data_profile": {"data_overview": "；".join(overview),
+                              "quality_issues": quality[:8],
+                              "working_set": working_set}},
+        )
+
+    if worker == "descriptive_analyst":
+        stats = [e["out"] for e in evs if e["tool"] == "run_descriptive_stats"
+                 and e["out"]]
+        if not stats:
+            return None
+        return (
+            {"step": "描述统计", "worker": worker, "status": "ok",
+             "summary": summary_head + f"共 {len(stats)} 组描述统计结果"},
+            {"statistical_results": {"descriptive": [
+                {"findings": stats, "source": "tool_evidence"}]}},
+        )
+
+    if worker == "modeling_analyst":
+        analyses = []
+        for e in evs:
+            out = e["out"]
+            if isinstance(out, dict) and out.get("method"):
+                analyses.append(out)
+            elif isinstance(out, dict) and out.get("results") is not None:
+                analyses.append({"method": e["tool"],
+                                 "results": str(out["results"])[:300]})
+            else:  # 如 execute_python 的 stdout 文本
+                analyses.append({"method": e["tool"],
+                                 "results": e["text"][:300]})
+        if not analyses:
+            return None
+        return (
+            {"step": "建模分析", "worker": worker, "status": "ok",
+             "summary": summary_head + f"共 {len(analyses)} 项分析"},
+            {"statistical_results": {"modeling": [
+                {"analyses": analyses, "source": "tool_evidence"}]}},
+        )
+
+    if worker == "visualizer":
+        return (
+            {"step": "可视化", "worker": worker, "status": "ok",
+             "summary": summary_head},
+            {},  # 图表归档由 D-025 回写路径完成
+        )
+    return None
+
+
 def chart_request(r: dict, requester: str) -> dict:
     """规范化一条图表需求单（D-007 协作载体）。"""
     return {"requester": requester, **{k: r.get(k) for k in
@@ -150,6 +257,7 @@ def process_new_messages(state: AnalysisState, tracer: RunTracer) -> dict:
     feedback: list[SystemMessage] = []
     usage: dict[str, int] = dict(state.get("tool_usage") or {})  # D-024
     tool_charts: list[dict] = []  # D-025：create_chart 成功结果的确定性证据
+    evidence: dict[str, list[dict]] = {}  # D-031：各 Worker 成功工具结果
     current_worker = None  # transfer_to_* 后的归属游标
 
     for msg in new_msgs:
@@ -159,11 +267,27 @@ def process_new_messages(state: AnalysisState, tracer: RunTracer) -> dict:
         if hasattr(msg, "tool_call_id"):
             tname = getattr(msg, "name", "") or ""
             if not tname.startswith("transfer") and current_worker:
-                err = _clip(content, 200) \
-                    if getattr(msg, "status", "") == "error" else None
+                # 失败判定：ToolMessage.status 或结果体 {"error": ...}
+                is_err = getattr(msg, "status", "") == "error"
+                parsed_out = None
+                if isinstance(content, str) and content.strip():
+                    try:
+                        j = json.loads(content)
+                    except ValueError:
+                        j = None
+                    if isinstance(j, dict):
+                        if j.get("error"):
+                            is_err = True
+                        else:
+                            parsed_out = j
+                err = _clip(content, 200) if is_err else None
                 tracer.log(current_worker, "tool_result",
                            tool={"name": tname, "provider": "native"},
                            output_summary=_clip(content, 300), error=err)
+                if not is_err:  # D-031：仅成功结果作为归档证据
+                    evidence.setdefault(current_worker, []).append(
+                        {"tool": tname, "out": parsed_out,
+                         "text": _clip(content, 300)})
                 # D-025：成功渲染的图表在工具结果中自带 image_path，
                 # 即使最终 JSON 缺失也可确定性回写（防「已渲染未归档」）
                 if tname == "create_chart":
@@ -278,6 +402,36 @@ def process_new_messages(state: AnalysisState, tracer: RunTracer) -> dict:
                             "确定性回写（D-025）",
                    next_action="写回状态字段")
 
+    # D-031：工具证据降级归档——Worker 有真实工具执行但无合格 JSON 时，
+    # 从成功工具结果确定性重构步骤（含 visualizer 补 completed step，
+    # 否则 D-025 只回写图表，覆盖检查/终止判定仍看不到 visualizer）
+    done_workers = {s["worker"] for s in completed if s.get("status") == "ok"}
+    for worker, evs in evidence.items():
+        if worker in done_workers:
+            continue
+        if worker == "visualizer" and not viz:
+            continue  # 无任何已归档图表则无归档依据
+        recon = _degraded_step(worker, evs)
+        if recon is None:
+            continue  # 无成功工具证据：维持 D-024 打回/零工作轮次逻辑
+        step_entry, extra = recon
+        completed.append(step_entry)
+        for k, v in extra.items():
+            if k == "statistical_results":
+                for key, lst in v.items():
+                    results.setdefault(key, []).extend(lst)
+            else:
+                updates[k] = v
+        tracer.log(worker, "check",
+                   decision="有真实工具执行但未输出约定 JSON，"
+                            "已从工具结果确定性降级归档（D-031）",
+                   next_action="写回状态字段")
+        feedback.append(SystemMessage(content=(
+            f"[sync 校验] {worker} 本轮有真实工具执行但未按约定输出 JSON "
+            "结果块，已从其工具执行结果确定性降级归档（D-031）。"
+            "注意：不要声称已收到 Worker 的 JSON——以本系统反馈为唯一归档"
+            "依据；若当前归档不足以回答分析假设，请调度补充分析。")))
+
     updates.update(completed_steps=completed, rejection_counts=rejections,
                    statistical_results=results, visualizations=viz,
                    chart_requests=chart_reqs, tool_usage=usage)
@@ -371,8 +525,12 @@ def build_app(
             return {"outer_loops": loops + 1, "iteration": iteration}
 
         # 零工作轮次纠正（D-024 补充）：Leader 未调度任何 Worker 就结束
-        # （如输出纯文本计划向用户提问）——回环要求其立即调度，而非空转收敛
-        if not should_stop and not state.get("completed_steps") and loops < 3:
+        # （如输出纯文本计划向用户提问）——回环要求其立即调度，而非空转收敛。
+        # tool_usage 守卫（D-031）：本轮已有真实工具调用（即使步骤归档
+        # 尚未生成）就不是零工作轮次，防止"Worker 干满活却被判未调度"误报
+        if (not should_stop and not state.get("completed_steps")
+                and not any((state.get("tool_usage") or {}).values())
+                and loops < 3):
             tracer.log("leader", "replan",
                        decision="上一轮 Leader 未调度任何 Worker（零工作轮次），回环纠正")
             return {"outer_loops": loops + 1, "iteration": iteration,

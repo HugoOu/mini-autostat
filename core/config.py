@@ -35,6 +35,8 @@ class AppConfig:
     worker_model: str | None = None   # Worker 专属模型（None=回退 model）
     leader_extra_body: dict | None = None   # Leader 请求附加字段（如思考链开关）
     worker_extra_body: dict | None = None   # Worker 请求附加字段
+    report_model: str | None = None   # 报告生成专属模型（None=回退 leader_model）
+    report_extra_body: dict | None = None   # 报告生成请求附加字段（思考链/推理力度）
     base_url: str | None = None
     api_key: str | None = None
     temperature: float = 0.0
@@ -60,6 +62,8 @@ def _build_parser() -> argparse.ArgumentParser:
                                           "未设置则回退 --model）")
     p.add_argument("--worker-model", help="Worker 专属模型名（默认取 OPENAI_WORKER_MODEL，"
                                           "未设置则回退 --model）")
+    p.add_argument("--report-model", help="报告生成专属模型名（默认取 OPENAI_REPORT_MODEL，"
+                                          "未设置则回退 Leader 模型）")
     p.add_argument("--max-turns", type=int, help="Leader 调度步数硬上限")
     p.add_argument("--max-repair-rounds", type=int, help="代码修复最大轮数")
     p.add_argument("--retriever", help="知识检索 provider：null/static（默认 null，T5.3）")
@@ -93,8 +97,11 @@ def load_config(argv: list[str] | None = None) -> AppConfig:
                       or os.getenv("OPENAI_LEADER_MODEL") or None),
         worker_model=(args.worker_model
                       or os.getenv("OPENAI_WORKER_MODEL") or None),
+        report_model=(args.report_model
+                      or os.getenv("OPENAI_REPORT_MODEL") or None),
         leader_extra_body=_extra_body_from_env("OPENAI_LEADER_EXTRA_BODY"),
         worker_extra_body=_extra_body_from_env("OPENAI_WORKER_EXTRA_BODY"),
+        report_extra_body=_extra_body_from_env("OPENAI_REPORT_EXTRA_BODY"),
         base_url=os.getenv("OPENAI_BASE_URL") or None,
         api_key=os.getenv("OPENAI_API_KEY") or None,
         max_turns=args.max_turns or int(os.getenv("MAX_TURNS", AppConfig.max_turns)),

@@ -19,15 +19,22 @@ def get_llm(
     config: AppConfig | None = None,
     temperature: float = 0.0,
     role: str | None = None,
+    override_extra_body: dict | None = None,
     **kwargs,
 ) -> ChatOpenAI:
     """获取 LLM 客户端（不缓存：各 Agent 可能需要不同的 temperature）。
 
-    role 分模型（D-026）：
+    role 分模型（D-026/D-039）：
     - role="leader"：取 leader_model（未配置则回退 model）+ leader_extra_body；
     - role="worker"：取 worker_model（未配置则回退 model）+ worker_extra_body；
+    - role="reporter"：报告生成专用（D-039）——取 report_model
+      （未配置则回退 leader_model，再回退 model）+ report_extra_body，
+      与 Leader 编排模型解耦（GLM-5.3-Flash 对报告级长调用间歇性 500）；
     - role=None：取通用 model，不附加额外请求字段（向后兼容）。
-    报告生成（reporter）为单次调用、质量优先，按约定使用 leader 角色。
+
+    override_extra_body（D-039）：最终覆盖 extra_body 的逐键覆盖项，
+    优先级高于角色配置——供报告生成降级 Worker 模型时开启思考链，而不
+    改动 Worker Agent 本身的 worker_extra_body 设置。
 
     timeout/max_retries（D-019）：单次调用 120s 超时 + 4 次重试（M5 验收
     期间提供方延迟曾超过 3 次尝试的 361s 上限，提升至约 600s），
@@ -36,9 +43,9 @@ def get_llm(
     temperature 覆盖（D-023）：设置环境变量 OPENAI_TEMPERATURE 后强制
     覆盖所有调用方的 temperature（部分模型如 kimi-k2.6 仅允许 1）。
 
-    extra_body：随请求体透传的附加字段（如 GLM 系列 `{"thinking":
-    {"type": "enabled"/"disabled"}}` 控制思考链），经环境变量
-    OPENAI_LEADER_EXTRA_BODY / OPENAI_WORKER_EXTRA_BODY（JSON）配置。
+    extra_body：随请求体透传的附加字段（如思考链开关、reasoning_effort），
+    经环境变量 OPENAI_LEADER_EXTRA_BODY / OPENAI_WORKER_EXTRA_BODY /
+    OPENAI_REPORT_EXTRA_BODY（JSON）配置。
     """
     cfg = config or load_config()
     env_temp = os.getenv("OPENAI_TEMPERATURE")
@@ -52,10 +59,18 @@ def get_llm(
     elif role == "worker":
         model = cfg.worker_model or cfg.model
         extra_body = cfg.worker_extra_body
+    elif role == "reporter":
+        if cfg.report_model:
+            model, extra_body = cfg.report_model, cfg.report_extra_body
+        elif cfg.leader_model:
+            model, extra_body = cfg.leader_model, cfg.leader_extra_body
 
-    if extra_body:
+    if extra_body or override_extra_body:
         merged = dict(kwargs.pop("extra_body", None) or {})
-        merged.update(extra_body)
+        if extra_body:
+            merged.update(extra_body)
+        if override_extra_body:
+            merged.update(override_extra_body)
         kwargs["extra_body"] = merged
 
     return ChatOpenAI(

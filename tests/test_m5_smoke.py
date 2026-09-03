@@ -71,19 +71,23 @@ def test_collect_materials_and_validate():
     assert "可再生能源发展与 GDP 的关系" in materials
     assert "r=0.85" in materials and "a.png" in materials
 
-    good = "## 数据说明\n..\n## 方法及选择原因\n..\n## 结果\n..\n## 不确定性\n..\n## 限制\n..\n## 不应得出的结论\n.."
+    good = ("## 一、问题与数据\n..\n## 二、分析过程\n..\n"
+            "## 三、主要发现\n..\n## 四、可靠性\n..\n"
+            "## 五、局限与适用边界\n..\n## 六、结论\n### 不应得出的结论\n..")
     assert validate_report(good) == []
-    missing = validate_report("## 数据说明\n..\n## 结果\n..")
-    assert set(missing) == {"方法及选择原因", "不确定性", "限制", "不应得出的结论"}
+    missing = validate_report("## 问题与数据\n..\n## 主要发现\n..")
+    assert set(missing) == {"分析过程", "可靠性", "局限与适用边界",
+                            "不应得出的结论"}
 
 
 def test_fallback_report_has_six_sections():
     from agents.reporter import REQUIRED_SECTIONS, _fallback_report, validate_report
 
     report = _fallback_report(_sample_state())
-    assert validate_report(report) == []  # 兜底版六要素齐全
+    assert validate_report(report) == []  # 兜底版六叙事章节齐全
     assert all(s in report for s in REQUIRED_SECTIONS)
     assert "r=0.85" in report  # 内容来自实际 state，非编造
+    assert "![趋势图](outputs/figures/a.png)" in report  # 保留 md 图片引用
     assert "确定性兜底" in report
 
 

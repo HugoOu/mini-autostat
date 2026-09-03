@@ -11,13 +11,13 @@
 | # | 考核要求 | 实现位置 | 运行证据 | 状态 |
 |---|---------|---------|---------|------|
 | B1 | 读取自然语言分析问题和数据文件，检查变量类型、缺失值与异常 | `app.py`（假设输入）+ `agents/workers/data_preprocessor.py` + `core/tools/data_tools.py`（`check_variable_types` / `check_missing_values` / `detect_outliers`） | 各次运行日志 data_preprocessor 步骤输出类型/缺失/IQR 异常报告（如 run_…092821 第 4、12 行） | ✅ |
-| B2 | 提出分析计划，说明拟采用的方法及其适用条件 | `agents/leader.py`（规划提示词）+ `core/tools/stat_tools.py`（每工具返回"假设条件是否满足"与适用性警告）+ `knowledge/retriever.py` 静态方法目录（`--retriever static` 注入） | 日志 leader 规划与 transfer 调度链；报告「方法及选择原因」章节 | ✅ |
+| B2 | 提出分析计划，说明拟采用的方法及其适用条件 | `agents/leader.py`（规划提示词）+ `core/tools/stat_tools.py`（每工具返回"假设条件是否满足"与适用性警告）+ `knowledge/retriever.py` 静态方法目录（`--retriever static` 注入） | 日志 leader 规划与 transfer 调度链；报告「分析过程」章节（含方法选择理由） | ✅ |
 | B3 | 自动生成并执行 Python 分析代码，保存关键结果和图表 | `core/tools/code_tools.py`（`execute_python`：子进程+超时+静态黑名单）+ `core/tools/viz_tools.py`（PNG→`outputs/figures/`，附等价文本表格） | 日志 tool_call 含 execute_python 参数与 stdout；M4 会话产出 4 张 PNG（run 记录 visualizations: 4） | ✅ |
 | B4 | 检查模型假设、运行错误或结果异常；必要时修改方案并重新执行 | 三层：① `stat_tools` 假设前置检查（如格兰杰 ADF 平稳性）；② Leader 即时打回（`rejection_counts` 上限 2）；③ sync 节点确定性 JSON 校验回环（T4.3） | M6 演示 run_…130750：工具报错→`execute_python` 派生变量重跑（事件 48-53）、非平稳→差分→重跑（事件 54-57）、图表列不存在→修正（事件 62-74）；run_…092821 记录 QC 打回与补做 | ✅ |
-| B5 | 输出结构化报告（数据说明、方法、结果、不确定性、限制、不应得出的结论） | `agents/reporter.py`（素材收集→LLM 成文→`validate_report` 校验→兜底降级） | `outputs/report.md`（兜底版）与 `outputs/report_llm.md`（LLM 版）六要素齐全、数值与日志一致 | ✅ |
-| B6 | 说明为什么选择当前方法、何时可能不可靠 | 报告「方法及选择原因」「限制」「不应得出的结论」章节 + stat_tools 的 `assumptions`/`warnings` 字段 | report_llm.md：伪回归风险、未检验不称显著等 | ✅ |
+| B5 | 输出结构化报告（数据说明、方法、结果、不确定性、限制、不应得出的结论） | `agents/reporter.py`（素材收集→LLM 成文→`validate_report` 校验→兜底降级；D-029 叙事结构，六要素为内容清单确定性嵌入对应章节） | `outputs/report.md`（兜底版）与 `outputs/report_llm.md`（LLM 版）六叙事章节齐全、六要素内容完整、数值与日志一致 | ✅ |
+| B6 | 说明为什么选择当前方法、何时可能不可靠 | 报告「分析过程」（方法选择理由）「局限与适用边界」「结论·不应得出的结论」章节 + stat_tools 的 `assumptions`/`warnings` 字段 | report_llm.md：伪回归风险、未检验不称显著等 | ✅ |
 | B7 | （题目说明）系统接收自然语言任务，自动完成多步规划与工具调用 | `app.py` → `workflows/graph.py` 主图（init→team→sync→gate→checkpoint→report） | 任一 run 日志可完整还原 | ✅ |
-| B8 | （题目说明）最小可运行、可复现、可解释设计取舍 | 一条命令运行（README 快速开始）；36 项离线测试；[Decision_Log.md](Decision_Log.md) 25 条决策记录含根因分析与取舍 | pytest 36 passed；Decision_Log | ✅ |
+| B8 | （题目说明）最小可运行、可复现、可解释设计取舍 | 一条命令运行（README 快速开始）；38 项离线测试；[Decision_Log.md](Decision_Log.md) 30 条决策记录含根因分析与取舍 | pytest 38 passed；Decision_Log | ✅ |
 
 ## 二、统一功能要求 8 条
 

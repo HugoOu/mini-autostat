@@ -237,6 +237,80 @@
 - **验证**：新增 4 组离线测试（覆盖检查规则 ×5 断言、绘图禁令 ×4 断言），38 项全部通过。
 - **影响范围**：`workflows/graph.py`、`core/state.py`（+1 字段）、`agents/workers/data_preprocessor.py`、`core/tools/code_tools.py`。
 
+### D-028 | 2026-09-03 | stream 流式模式兼容性实测（D-030 前置验证）
+- **背景**：负责人同意 CLI 实时状态展示采用 stream 流式消费方案（方案 A），要求先实测验证再实施。
+- **决策**：编写 `scripts/check_stream.py` 实测三层结论：
+  1. `stream_mode="updates"` 下静态 `interrupt_before` 正常生效，呈现为 `{'__interrupt__': ()}` **空元组**事件（恢复必须用 `input=None`，`Command(resume=None)` 会触发 langgraph 库 UnboundLocalError）；
+  2. 动态 `interrupt()` 呈现为含 `Interrupt(value=...)` 对象的非空元组，`Command(resume=...)` 正常续流；
+  3. `subgraphs=True` 时事件按三层命名空间呈现：worker 子图层（`agent`/`tools` 步级）、team 层（leader/worker 节点完成）、根层（init/sync/gate/report），足以支撑按 Worker 归组的进度打印机。
+- **实施要点**：暂停后旧流即耗尽，必须"先检查待恢复输入、再取事件"重建流（实测踩坑一次）。
+- **影响范围**：仅 scripts（验证脚本），不改变工作流。
+
+### D-029 | 2026-09-03 | 报告结构重构：六要素从章节结构降为内容清单，改为问题驱动叙事（负责人确认方案 A）
+- **背景**：负责人指出原报告被六要素限定过死，缺乏"探索→发现→解决"的过程叙事，不符合问题驱动的专业分析报告。
+- **决策**：报告按六叙事章节组织（问题与数据 → 分析过程 → 主要发现 → 可靠性 → 局限与适用边界 → 结论），六要素内容确定性映射嵌入对应章节（数据说明→问题与数据；方法及选择原因→分析过程；结果→主要发现；不确定性→可靠性；限制→局限与适用边界；不应得出的结论→结论内 `###` 小节）；`validate_report` 改按叙事章节校验；图表一律 Markdown 图片语法嵌入；篇幅不设上限（建议不少于 1500 字，负责人认可的下限）；兜底报告章节同步改为叙事结构并通过校验；内容只允许来自运行素材的防编造约束不变。未来可引入专职 report_writer Worker（U-7 登记，demo 阶段不实现）。
+- **影响范围**：`agents/reporter.py`、`tests/test_m5_smoke.py`、FUTURE_UPGRADES（U-7）。
+
+### D-030 | 2026-09-03 | CLI 实时进度展示：invoke 循环升级为 stream 消费（负责人确认方案 A）
+- **背景**：CLI 原先仅在中断点/确认点有文字提示，工作流执行过程对用户不可见。
+- **决策**：`app.py` 主循环改为 `stream(stream_mode="updates", subgraphs=True)`，按 D-028 实测粒度转译为一行式实时进度：worker 子图层打印工具调用（`· worker：工具名`）；team 层打印 Leader 调度（`[调度] Leader → worker：任务`，取交接工具 tool_calls）与 Worker 交接摘要（`[完成]`，解析交接 JSON 的 summary）；根层打印质检判定（`[质检]`，sync）、打回/完整性反馈（`[系统]`，gate 的 SystemMessage）、收敛原因（`[收敛]`）与报告生成（`[报告]`）。两类暂停点交互逻辑不变（空元组=中断点/非空元组=确认点），Ctrl+C 终止语义保持（as_node="sync" 终止标记）。
+- **验证**：离线玩具图验证（_emit 转译 ×5 形态断言、静态+动态暂停点各触发一次、恢复链与收敛状态正确）；全量回归 38 项通过；在线实测见 `scripts/check_stream.py` 运行记录。
+- **影响范围**：`app.py`（主循环重写）；工作流与交互语义零改动。
+
+### D-031 | 2026-09-03 | 工具证据降级归档 + 零工作轮次判定收紧（run_20260903_163256 根因修复）
+- **背景**：负责人报告 CLI 异常——visualizer 完成后 gate 却提示"上一轮你没有调度任何 Worker"并回环，之后需手动 stop 才收敛。读 checkpoints.sqlite 还原现场，根因链三层：① Worker（deepseek-v4-flash，无思考链）在叙述句后直接结束回合（如"现在将数据预处理结果回报给 leader："），约定的 JSON 结果块从未输出（实测 completion 仅 ~100 token、stop 正常，非截断；`transfer_back_to_leader` 是 langgraph_supervisor 在 Worker 回合结束时自动附加的合成消息对，与模型无关）；② sync 对"有工具调用但无 JSON"的 AIMessage 静默忽略（D-024 只校验有 JSON 的消息），`completed_steps` 全程为空；③ gate 零工作轮次纠正按规则误触发。同时 Leader 全程幻觉"已收到合格 JSON 结果块"（消息 64/71），依赖幻觉调度还自我感觉质检通过。全靠 D-025 从 create_chart 工具结果回写才保住 3 张图表。
+- **决策**（三处确定性修复 + 两处提示词辅助）：
+  1. **工具证据降级归档**（扩展 D-025 原则到全部 Worker）：sync 记录每个 Worker 的成功工具结果；Worker 本轮有成功工具执行但无合格 JSON 时，由 `_degraded_step` 从工具结果确定性重构步骤归档——data_preprocessor 重构 data_overview/quality_issues/working_set，descriptive 归档 findings，modeling 归档 analyses（execute_python 的 stdout 文本也是证据），visualizer 补 completed step（D-025 原先只回写图表，覆盖检查/终止判定看不到 visualizer）。步骤显式标注"降级归档（D-031）"，内容全部来自真实工具结果，防编造约束不变；
+  2. **零工作轮次判定收紧**：gate 增加 `tool_usage` 守卫——本轮已有真实工具调用就不是零工作轮次，消除"Worker 干满活却被判未调度"误报；
+  3. **系统反馈治理幻觉**：降级归档时注入 SystemMessage，告知 Leader"Worker 未输出 JSON，已从工具结果降级归档；不要声称已收到 JSON，以本系统反馈为唯一归档依据"；
+  4. Worker 提示词（4 个）新增"回合结束方式（重要）"——最后一条消息必须整体是 JSON 块，禁止叙述句收尾后停止（best-effort，不作为正确性依赖）；
+  5. Leader 提示词新增"不要声称已收到 Worker 的 JSON"。
+- **验证**：新增 3 组离线测试（preprocessor 重构断言、modeling 文本证据、无成功证据维持 D-024 逻辑）+ 更新 D-025 测试断言（visualizer 现在补 completed step + 反馈），42 项全部通过。待负责人在线验证。
+- **影响范围**：`workflows/graph.py`、`agents/leader.py`、`agents/workers/*.py`（提示词）。
+
+### D-032 | 2026-09-03 | 图表内文字一律英文
+- **背景**：负责人检查生成的 PNG 发现中文渲染问题。
+- **决策**：`viz_tools.create_chart` 引入 `_render_title`——非 ASCII（中文）或空标题确定性回退为 `"{y} vs {x}"`（列名英文），轴标签用数据列名，bar 图 Y 轴 "(mean)"，文件名与等价文本表格标题与 PNG 内标题保持一致；中文字体配置（D-015）保留作中文列名等边缘场景兜底。不依赖 Worker 提示词自觉（模型给中文标题照样正确回退）。
+- **验证**：`test_render_title_english_fallback` + `test_viz_tools` 断言更新（中文标题不出现在文本表格、回退标题一致），42 项全部通过。
+- **影响范围**：`core/tools/viz_tools.py`。
+
+### D-033 | 2026-09-03 | 首轮中断点自动继续，不再打断（负责人提出）
+- **背景**：负责人指出启动后刚输入假设就遇到 `[中断点] 已完成 0 步` 询问，此时无需任何确认。
+- **决策**：CLI stream 主循环增加 `first_pause` 标志——首轮 team 执行前的静态中断点静默继续（不打断、不打印），仅 QC 回环与追加任务轮的中断点仍询问。确认点行为不变。
+- **验证**：离线玩具图验证（首轮无 `[中断点]` 提示、追加任务后第二轮中断点正常询问、两轮确认点交互正常）；42 项离线回归通过。
+- **附带发现与恢复**：负责人报告"找不到最新报告"——实为 run_20260903_175909 在**确认点**等待回车生成报告时进程被关闭（检查点状态完好：4 Worker 降级归档 + 6 图表 + stop_reason 已设，`final_report` 为空）。通过 `Command(resume="go")` 从 checkpoints.sqlite 续跑 report 节点完成恢复，未重跑分析。教训：确认点是报告生成的必要一步。
+- **影响范围**：`app.py`、README（交互协议表、检验 3）。
+
+### D-035 | 2026-09-03 | Visualizer 原生生成英文图表文字（负责人提出）
+- **背景**：负责人反馈图表标题被简单设置为 "X vs Y"，要求 Visualizer Agent 原生自行生成英文图内容。排查确认：visualizer 把需求单中的中文标题（如「美国GDP与可再生能源发电量散点关系 (1965-2023)」）原样传给 `create_chart`，被 D-032 回退逻辑降级为 "y vs x"。
+- **决策**：双层修复——(1) `create_chart` 新增可选 `xlabel`/`ylabel` 参数（英文可读轴标签，如 `renewables_share_energy → "Renewable Energy Share (%)"`），未提供时回退列名；(2) visualizer 提示词新增「图表文字必须由你原生生成」硬性要求：中文标题须翻译/改写为学术化英文标题、提供英文轴标签、最终 JSON 的 title 与工具入参一致。D-032 回退逻辑保留作最后防线。
+- **验证**：离线自测——英文标题+轴标签按传入渲染、中文标题正确回退；42 项离线回归通过；e2e 见后续运行记录。
+- **影响范围**：`core/tools/viz_tools.py`、`agents/workers/visualizer.py`。
+
+### D-036 | 2026-09-03 | 报告生成模型分层重试（负责人提出"永远兜底"）
+- **背景**：负责人反馈历次运行全部生成确定性兜底报告。探针实测（scripts/probe_report_llm.py）：Leader 模型（glm-5.3-flash，思考链开启）生成六章节完整报告耗时 **350s**——D-034 的 timeout=600 修复在上次验证运行之后才提交，从未被实测；此前 120s 预算必然全部超时，这就是"永远兜底"的根因。
+- **决策**：reporter 重试链改为模型分层（Leader 模型 → Worker 模型）——Leader 模型失败或校验不过时降级用 Worker 模型（deepseek-v4-flash，无思考链，速度快）再试一次，两者都不可用才走确定性兜底；新增 `_content_text` 规范化 AIMessage.content（思考链模型可能返回 thinking/text 分块列表，避免 `str(list)` 产生转义 repr）；tracer 记录每层耗时与字数便于诊断。
+- **验证**：探针 PROBE PASS（350s、4397 字、六章节齐全）；42 项离线回归通过。
+- **影响范围**：`agents/reporter.py`、`scripts/probe_report_llm.py`（临时探针）。
+
+### D-037 | 2026-09-03 | 报告素材分段截断，图表路径段受保护
+- **背景**：run_20260903_190008 首次产出正常 LLM 报告（D-036 生效：Leader 模型遇 Error 500，Worker 模型 80s 生成 4462 字校验通过），但六张图片引用路径全部为"(运行中未记录)"——`collect_materials` 的整体 6000 字符截断把末尾的图表段（标题+image_path）整体切掉，LLM 拿不到真实路径。
+- **决策**：`collect_materials` 改为分段截断——data_profile（2400）、statistical_results（4000）等大 JSON 段各自限长（`_jclip`），图表段（标题+image_path+状态）不受限；text_table 摘录压至 200 字符；整体 16000 字符仅作极端安全网。图表段标题注明"报告引用图片一律用 image_path 原文"。
+- **验证**：42 项离线回归通过；用 run_20260903_190008 真实 checkpoint state 重生成报告（scripts/regen_report.py），图片引用应为真实 PNG 路径（结果见运行记录）。
+- **影响范围**：`agents/reporter.py`、`scripts/resume_report.py`、`scripts/regen_report.py`。
+
+### D-038 | 2026-09-03 | 报告图片引用路径确定性转换（负责人提出图片不能渲染）
+- **背景**：run_20260903_200653 首次产出带真实图片引用的 LLM 报告，但图片无法渲染——引用为 `outputs\figures\x.png`：反斜杠被 Markdown 渲染器当转义符；且 report.md 位于 outputs/ 下，以项目根为基准的路径多了一层目录（解析为 outputs/outputs/figures）。根因：素材中 image_path 是以进程工作目录为基准的原始路径，LLM 照抄。
+- **决策**：新增 `_md_image_path`——把 image_path 确定性转换为相对 output_dir（report.md 所在目录）的正斜杠路径（如 `figures/x.png`）；collect_materials/_fallback_report 的图表引用一律经此转换，不依赖 LLM 改写；generate_report 内另加 `_fix_paths` 后处理兜底（LLM 若仍输出原始路径则统一替换）；提示词同步注明"路径逐字使用素材路径"。未提供 output_dir 时仅做正斜杠化（向后兼容）。
+- **验证**：42 项离线回归通过；`outputs\figures\X.png`→`figures/X.png` 转换正确；用 run_20260903_200653 真实 state 重生成报告验证渲染（结果见运行记录）。
+- **影响范围**：`agents/reporter.py`。
+
+### D-039 | 2026-09-03 | 报告生成专属模型：GLM 500 → Qwen3.8-Flash（负责人提出）
+- **背景**：负责人指出三次检验运行的非兜底报告中两次由 Worker 层生成。日志排查（run_20260903_191658/200653/213725）：D-034 后超时问题已解决（21:37 运行 Leader 模型 397s 成功），失败模式变为提供方对 glm-5.3-flash 报告级长调用（~8-10k 字符提示 + 思考链）**间歇性 HTTP 500 Internal server error**（19:16、20:06 两次复现），属 GLM 模型/提供方问题而非代码问题。
+- **决策**：新增报告生成专属模型配置 `report_model`/`report_extra_body`（env：OPENAI_REPORT_MODEL/OPENAI_REPORT_EXTRA_BODY，CLI：--report-model；未配置回退 Leader 模型），与 Leader 编排模型解耦——Leader 编排（glm-5.3-flash）实测稳定，仅报告大调用换 **qwen3.8-flash（思考链开启 + reasoning_effort xhigh）**。reporter 第 1 层改用 role="reporter"，第 2 层降级 Worker 模型时经 get_llm 新增的 `override_extra_body` 临时把思考链覆盖为开启（优先级高于角色配置），**不改动 Worker Agent 本身的 worker_extra_body**。
+- **验证**：qwen3.8-flash 参数格式探针（enable_thinking+reasoning_effort 被提供方接受且产出 reasoning_content）；42 项离线回归通过；完整报告探针结果见运行记录。
+- **影响范围**：`core/config.py`、`core/llm.py`、`agents/reporter.py`、`.env`、`.env.example`。
+
 ---
 
 ## 待确认事项

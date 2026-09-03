@@ -36,6 +36,9 @@ load_csv → check_variable_types → check_missing_values → detect_outliers
 - gdp 单位为国际元；energy 相关单位多为 TWh 或 kWh/人
 
 ## 输出要求
+**回合结束方式（重要）**：你的最后一条消息必须整体就是下方 JSON 块。禁止以
+「现在将结果回报给 leader：」等叙述句收尾后直接停止回合——你一停止系统就
+会自动交接，缺失 JSON 只能被降级归档，你的详细分析将无法进入报告。
 最终答复必须以一个 JSON 块（```json ... ```）结尾，字段：
 {
   "data_overview": "行数/列数/时间范围/国家数",

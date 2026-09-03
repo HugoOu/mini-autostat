@@ -136,17 +136,30 @@ def test_viz_tools():
     assert "error" not in scatter, scatter
     assert Path(scatter["image_path"]).exists()
     assert "相关系数" in scatter["text_table"]
-    assert "中国可再生能源占比趋势" in scatter["text_table"]
+    # D-032：图表内文字一律英文——中文标题确定性回退为 "{y} vs {x}"，
+    # 文本表格标题与 PNG 内标题一致（防中文渲染乱码）
+    assert "renewables_share_energy vs year" in scatter["text_table"]
+    assert "中国可再生能源占比趋势" not in scatter["text_table"]
 
     line = _parse(create_chart.invoke({
         "chart_type": "line", "x": "year", "y": "gdp",
-        "title": "中国 GDP 趋势", "n_preview": 5,
+        "title": "GDP trend 2000-2023", "n_preview": 5,  # ASCII 标题原样保留
     }))
     assert "error" not in line, line
     assert Path(line["image_path"]).exists()
+    assert "GDP trend 2000-2023" in line["text_table"]
 
     bad = _parse(create_chart.invoke({"chart_type": "pie", "x": "year", "y": "gdp"}))
     assert "error" in bad
+
+
+def test_render_title_english_fallback():
+    """D-032：非 ASCII（中文）标题回退 "{y} vs {x}"，ASCII 保留。"""
+    from core.tools.viz_tools import _render_title
+
+    assert _render_title("中国趋势", "year", "gdp") == "gdp vs year"
+    assert _render_title("  GDP trend  ", "year", "gdp") == "GDP trend"
+    assert _render_title("", "year", "gdp") == "gdp vs year"
 
 
 def test_code_tools():
@@ -213,6 +226,7 @@ if __name__ == "__main__":
         test_granger_refusal_and_success,
         test_regression_with_diagnostics,
         test_viz_tools,
+        test_render_title_english_fallback,
         test_code_tools,
         test_registry_full,
     ]
