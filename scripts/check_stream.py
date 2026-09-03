@@ -69,7 +69,7 @@ from core.config import ensure_dirs, load_config  # noqa: E402
 from core.tracer import RunTracer  # noqa: E402
 from workflows.graph import build_app, invoke_budget  # noqa: E402
 
-config = load_config(["--data", "examples/renewable_energy_gdp.csv",
+config = load_config(["--data", "datasets/renewable_energy_gdp.csv",
                       "--max-turns", "2"])
 ensure_dirs(config)
 

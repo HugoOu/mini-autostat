@@ -24,7 +24,7 @@ D-028 实测）转译为一行式进度：
 终止标记跳过当前轮 team，直接收敛到报告。
 
 用法：
-    .venv\\Scripts\\python.exe app.py --data examples/owid-energy-data.csv
+    .venv\\Scripts\\python.exe app.py --data datasets/owid-energy-data.csv
     （也可 --hypothesis "..." 直接给假设，--retriever static 开启知识注入）
 """
 from __future__ import annotations
@@ -220,7 +220,7 @@ def main() -> None:
                       "（renewables_share_energy）与经济增长（gdp）之间的"
                       "关系，请先做描述统计，再做相关性分析。")
     config.data_path = config.data_path if config.data_path.exists() \
-        else Path("examples/owid-energy-data.csv")
+        else Path("datasets/owid-energy-data.csv")
     ensure_dirs(config)
 
     from langgraph.checkpoint.sqlite import SqliteSaver

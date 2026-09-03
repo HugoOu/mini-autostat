@@ -123,7 +123,7 @@ def test_interrupt_pause_before_team():
     from workflows.graph import build_app
 
     config = load_config([])
-    config.data_path = Path("examples/owid-energy-data.csv")
+    config.data_path = Path("datasets/owid-energy-data.csv")
     tracer = _tracer()
     app = build_app(config, tracer, checkpointer=MemorySaver(), interrupt_before=True)
     cfg = {"configurable": {"thread_id": "m5_interrupt_test"}}
@@ -133,7 +133,7 @@ def test_interrupt_pause_before_team():
          "current_hypothesis": "测试假设"},
         config=cfg,
     )
-    assert Path(result["data_path"]) == Path("examples/owid-energy-data.csv")  # init 已执行
+    assert Path(result["data_path"]) == Path("datasets/owid-energy-data.csv")  # init 已执行
     snap = app.get_state(cfg)
     assert snap.next == ("team",)  # 静态暂停在 team 之前（T5.1 验收核心）
 

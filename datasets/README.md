@@ -32,11 +32,11 @@
 ### 提取 renewable_energy_gdp.csv 的命令（可复现）
 
 ```powershell
-python -c "import pandas as pd; df = pd.read_csv('examples/owid-energy-data.csv', usecols=['country','year','gdp','renewables_share_energy']); sub = df[df['country'].isin(['China','United States']) & df['year'].between(2000,2023)]; sub.to_csv('examples/renewable_energy_gdp.csv', index=False)"
+python -c "import pandas as pd; df = pd.read_csv('datasets/owid-energy-data.csv', usecols=['country','year','gdp','renewables_share_energy']); sub = df[df['country'].isin(['China','United States']) & df['year'].between(2000,2023)]; sub.to_csv('datasets/renewable_energy_gdp.csv', index=False)"
 ```
 
 ### 配合本子集的快速演示
 
 ```powershell
-.venv\Scripts\python.exe app.py --data examples\renewable_energy_gdp.csv --max-turns 6 --hypothesis "对比中美两国 2000-2023 年可再生能源占比与 GDP 的描述统计"
+.venv\Scripts\python.exe app.py --data datasets\renewable_energy_gdp.csv --max-turns 6 --hypothesis "对比中美两国 2000-2023 年可再生能源占比与 GDP 的描述统计"
 ```

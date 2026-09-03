@@ -1,8 +1,8 @@
 # Mini AutoSTAT
 
-一个基于 **LangGraph + langgraph-supervisor** 的 Leader–Worker 多智能体自动化统计分析系统：接收一条自然语言分析假设与一份 CSV 数据，由 Leader Agent 规划调度四个专职 Worker Agent（数据预处理 / 描述统计 / 统计建模 / 可视化），自动完成数据分析全流程，收敛后产出一份**问题驱动的叙事式分析报告**（含图表与等价文本表格）。
+一个基于 **LangGraph + langgraph-supervisor** 的 Leader–Worker 自动化统计数据分析多智能体系统：用户发出需要验证的一条假设或问题与 CSV 数据，由 Leader Agent 规划调度四个专职 Worker Agent（数据预处理 / 描述统计 / 统计建模 / 可视化），自动完成数据分析全流程，收敛后产出一份**问题驱动的叙事式分析报告**（含图表）。
 
-系统**数据无关**：`--data` 可指向任意 CSV 数据集，仓库自带的 OWID 能源数据仅为演示示例（见 [examples/README.md](examples/README.md)）。
+系统**数据无关**：`--data` 可指向任意 CSV 数据集，仓库自带的 OWID 能源数据仅为演示示例（见 [datasets/README.md](datasets/README.md)）。
 
 ---
 
@@ -10,8 +10,8 @@
 
 - **Leader–Worker 编排**：Leader（规划/质检/收敛判断）+ 4 个专职 Worker，工具调用与交接消息全量留痕；
 - **实时 CLI 进度**：stream 模式逐事件转译为 `[调度] / [完成] / [质检] / [收敛] / [报告]` 一行式进度；
-- **两类人工暂停点**：中断点（可终止/注入新指令）与确认点（可追加任务续跑），支持 Ctrl+C 安全收敛；
-- **终止机制**：Leader 判定收敛 + `max_turns` 硬上限 + 用户主动终止，三重保险防无限循环；
+- **支持追加新任务**：中断点（可终止/注入新指令）与确认点（可追加任务续跑），支持 Ctrl+C 即时停止并总结当前进度生成报告；
+- **终止机制**：Leader 判定收敛 + `max_turns` 硬上限 + 用户主动终止；
 - **结果防编造**：报告只能引用确定性序列化的运行素材；六章节缺失自动校验重试，LLM 全部失败时退回确定性兜底报告；
 - **异常自恢复**：代码报错自修复重试、统计假设不满足时自动差分/换方法、渲染失败自动修正；
 - **模型分层可配置**：Leader / Worker / 报告生成三层模型与思考链独立配置；
@@ -19,20 +19,29 @@
 
 ## 系统架构
 
-```
-用户假设 + CSV
-     │
-     ▼
-init（注入运行事实） → team（Leader 调度 ⇄ 4 个 Worker） → sync（确定性质检）
-     ▲                        │                                 │
-     │      不合格/未覆盖打回  │                                 ▼
-     └──────────── gate（回环判断）◄──────────────────── 汇总归档
-                                      │ Leader FINISH
-                                      ▼
-                          checkpoint（确认点 interrupt）
-                                      │ 用户确认
-                                      ▼
-                          report（LLM 成文 + 校验 + 兜底） → outputs/report.md
+```mermaid
+flowchart TD
+    U[用户假设<br>CLI/--hypothesis] --> INIT[init 节点<br>登记假设+RAG 知识注入]
+    INIT --> TEAM["team：supervisor 子图<br>Leader ⇄ 4 Worker 循环"]
+
+    subgraph W [Worker Agents]
+        P[data_preprocessor<br>类型/缺失/异常体检]
+        D[descriptive_analyst<br>描述统计]
+        M[modeling_analyst<br>相关/回归/格兰杰<br>+代码生成执行与自修复]
+        V[visualizer<br>PNG+等价文本表格]
+    end
+    TEAM -.调度.-> W
+
+    TEAM --> SYNC[sync 节点<br>增量解析 Worker JSON<br>确定性校验]
+    SYNC --> GATE{gate：三重终止检查}
+    GATE -- 未完成/QC 打回 --> TEAM
+    GATE -- Leader FINISH --> CP[checkpoint 确认点<br>动态 interrupt]
+    CP -- 用户追加任务 --> TEAM
+    CP -- 确认出报告 --> REPORT[report 节点<br>叙事报告：LLM 成文→校验→兜底]
+    GATE -- 预算/终止标记 --> REPORT
+    REPORT --> ENDx[(outputs/report.md<br>+ logs/run_id.jsonl)]
+
+    SAV[(SqliteSaver<br>checkpoints.sqlite)] -.持久化.- GATE
 ```
 
 | 角色 | 职责 | 内置工具 |
@@ -43,7 +52,7 @@ init（注入运行事实） → team（Leader 调度 ⇄ 4 个 Worker） → sy
 | modeling_analyst | 相关/回归/格兰杰/平稳性，含生成代码执行 | 统计工具 + execute_python |
 | visualizer | 图表渲染（PNG + 等价文本表格，英文图表） | create_chart |
 
-所有工具经 `core/tools/registry.py` 注册（`native` provider，预留 MCP 接入点）；知识检索经 `knowledge/retriever.py` 工厂（`null`/`static`，预留 RAG 接口）。
+所有工具经 `core/tools/registry.py` 注册（`native` provider，预留 MCP 接入点）；知识检索经 `knowledge/retriever.py` 工厂（`null`/`static`，预留 RAG 接口）
 
 ## 环境要求
 
@@ -74,12 +83,12 @@ Copy-Item .env.example .env
 .\.venv\Scripts\python.exe app.py
 ```
 
-不带参数启动即为完整分析会话：默认加载 `examples/owid-energy-data.csv`，回车使用内置示例假设（中国 2000-2023 可再生能源与 GDP 关系），随后自动执行到收敛并生成报告。
+不带参数启动即为完整分析会话：默认加载 `datasets/owid-energy-data.csv`，回车使用内置示例假设（中国 2000-2023 可再生能源与 GDP 关系），随后自动执行到收敛并生成报告。
 
 指定自有数据与假设（推荐）：
 
 ```powershell
-.\.venv\Scripts\python.exe app.py --data examples/renewable_energy_gdp.csv --hypothesis "对比中美两国 2000-2023 年可再生能源占比与 GDP 的描述统计"
+.\.venv\Scripts\python.exe app.py --data datasets/renewable_energy_gdp.csv --hypothesis "对比中美两国 2000-2023 年可再生能源占比与 GDP 的描述统计"
 ```
 
 **会话内交互**：
@@ -98,7 +107,7 @@ Copy-Item .env.example .env
 
 | 参数 | 说明 | 默认 |
 |------|------|------|
-| `--data` | CSV 数据文件路径 | `examples/owid-energy-data.csv` |
+| `--data` | CSV 数据文件路径 | `datasets/owid-energy-data.csv` |
 | `--hypothesis` | 分析假设（缺省进入交互输入） | 内置示例 |
 | `--model` | 通用/回退 LLM 模型名 | `OPENAI_MODEL` 或 `glm-5.3-flash` |
 | `--leader-model` / `--worker-model` / `--report-model` | 分角色专属模型 | 依次回退上层 |
@@ -125,7 +134,7 @@ Copy-Item .env.example .env
 **输入**
 
 - **分析假设**：自然语言字符串（`--hypothesis` 或启动后交互输入）；
-- **数据**：任意 CSV 文件。首次使用建议至少包含假设中提到的列；系统会先做数据体检（类型/缺失/异常值），按假设筛选工作集。示例数据见 [examples/README.md](examples/README.md)。
+- **数据**：任意 CSV 文件。首次使用建议至少包含假设中提到的列；系统会先做数据体检（类型/缺失/异常值），按假设筛选工作集。示例数据见 [datasets/README.md](datasets/README.md)。
 
 **输出**（均在运行结束时打印路径）
 
@@ -160,7 +169,7 @@ mini_autostat/
 │   └── graph.py                  # 主图组装 init→team→sync→gate→checkpoint→report
 ├── knowledge/
 │   └── retriever.py              # 检索工厂（null/static，预留 RAG）
-├── examples/
+├── datasets/                     # 专门的数据集目录（演示数据，见 datasets/README.md）
 │   ├── README.md                 # 示例数据来源、许可与提取命令
 │   ├── renewable_energy_gdp.csv  # 中美 2000-2023 演示子集（48 行）
 │   └── owid-energy-data.csv      # 完整 OWID 能源数据集（23,377 行 × 130 列）
@@ -173,6 +182,8 @@ mini_autostat/
 └── FUTURE_UPGRADES.md            # 升级方向清单
 ```
 
+> **`datasets/` 是专门存放数据集的目录**：仓库自带的演示数据统一存放于此（来源与许可见 [datasets/README.md](datasets/README.md)）。分析自有数据时，把 CSV 放入该目录即可；由于系统数据无关，`--data` 也可指向磁盘上任意路径的 CSV，并不要求文件必须位于此目录。
+
 ## 测试
 
 ```powershell
@@ -183,7 +194,7 @@ mini_autostat/
 端到端在线验收可用小数据集快速验证：
 
 ```powershell
-.\.venv\Scripts\python.exe app.py --data examples/renewable_energy_gdp.csv --max-turns 6 --hypothesis "对比中美两国 2000-2023 年可再生能源占比与 GDP 的描述统计"
+.\.venv\Scripts\python.exe app.py --data datasets/renewable_energy_gdp.csv --max-turns 6 --hypothesis "对比中美两国 2000-2023 年可再生能源占比与 GDP 的描述统计"
 ```
 
 ## 已知限制
@@ -201,7 +212,7 @@ mini_autostat/
 
 ## 许可证
 
-MIT License。示例数据来自 [Our World in Data](https://github.com/owid/energy-data)（CC BY 4.0），见 [examples/README.md](examples/README.md)。
+MIT License。示例数据来自 [Our World in Data](https://github.com/owid/energy-data)（CC BY 4.0），见 [datasets/README.md](datasets/README.md)。
 
 ---
 

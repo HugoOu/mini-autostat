@@ -34,7 +34,7 @@ def main() -> None:
 
     config = load_config([])
     ensure_dirs(config)
-    config.data_path = "examples/owid-energy-data.csv"
+    config.data_path = "datasets/owid-energy-data.csv"
 
     from langgraph.checkpoint.sqlite import SqliteSaver
 
