@@ -170,7 +170,8 @@
 
 ### D-019 | 2026-09-02 | LLM 客户端超时与重试（助手自行决定，向负责人报告）
 - **背景**：诊断过程中出现网络层 TLS 握手中断（`EOF occurred in violation of protocol`），Agent 可能因网络劣化无限挂起；
-- **决定**：`core/llm.py get_llm()` 统一设置 `timeout=120s` + `max_retries=2`（可用 kwargs 覆盖），单点封装、所有 Agent 生效。
+- **决定**：`core/llm.py get_llm()` 统一设置 `timeout=120s` + `max_retries=2`（可用 kwargs 覆盖），单点封装、所有 Agent 生效；
+- **补录（2026-09-03）**：M5 在线验收期间提供方延迟两次超过 3 次尝试的 361s 上限（reporter 调用持续超时约 600s），`max_retries` 2→4（最长约 600s/次调用），架构与调用方式零改动；离线回归 31 项全部通过。
 
 ### D-020 | 2026-09-02 | 主图 Checkpointer 选型与子图死锁根因修正
 - **现象**：外层控制图嵌套 supervisor 子图后，`MemorySaver` 与 `SqliteSaver` 两种 checkpointer 下 invoke 均在进入 team 子图时挂起（tracer 日志均止步于 init 的 route 事件）；无 checkpointer 的同一图 77s 正常跑通，team 子图单独 invoke 108s 正常；
@@ -178,6 +179,25 @@
 - **修正**：`create_supervisor(...).compile(checkpointer=False)` 显式关闭子图继承，持久化只保留外层图级别——子图消息经 `add_messages` 已汇入主状态，外层 checkpoint 足以支撑 M5 中断恢复；
 - **选型**：demo 采用 `SqliteSaver`（文件级持久化，可跨进程续跑，比 MemorySaver 更贴近 M5 需求）；升级 PostgresSaver 仅改 `build_app` 的 compile 处（D-003 终态不变）；
 - **教训**：此前初判"MemorySaver 与子图嵌套组合死锁、SqliteSaver 可解"不准确——真正的变量是子图是否继承 checkpointer，与 saver 实现无关。
+
+### D-021 | 2026-09-03 | M5 中断/报告/检索预留实现细节（助手自行决定，向负责人报告）
+1. **T5.3 RAG 预留接口**：`knowledge/retriever.py` 定义 `BaseRetriever.retrieve(query, k) -> list[str]` 抽象接口 + 工厂 `create_retriever(provider)`；两个占位实现：`NullRetriever`（恒空，默认）、`StaticMethodCatalog`（内置方法适用条件知识条目，关键词匹配，与 stat_tools 的方法选择逻辑对齐）；config 新增 `retriever` 项（`--retriever` / 环境变量 `RETRIEVER`）；**唯一注入点**在 init 节点——按用户假设检索，命中则以 SystemMessage 注入对话（注入格式由 `build_context_block` 统一）。未来换真实 RAG：新增子类 + 工厂注册 + 改配置，工作流零改动（T5.3 验收）；
+2. **T5.2 六要素报告**：`agents/reporter.py` 三层结构——① `collect_materials` 确定性序列化 state（报告只能引用实际运行结果，防编造）；② LLM 按六要素成文 + `validate_report` 确定性校验章节齐全性，缺项携带反馈重试 1 次；③ LLM 异常或两次缺项时 `_fallback_report` 确定性兜底（六要素齐全、标注兜底来源），报告生成永不因 LLM 故障中断；
+3. **T5.1 中断机制**：`build_app` 新增 `interrupt_before` 参数——编译期 `interrupt_before=["team"]`，每轮团队执行前静态暂停（配合 SqliteSaver resume）；CLI 入口 `app.py` 交互协议：回车=继续 / `stop`=终止 / 其他文本=注入新指令（HumanMessage，Leader 基于 completed_steps 重规划）；终止路径用 `update_state(as_node="sync")` 写入 `stop_reason` 使下一步直达 gate→report，**跳过当前轮 team** 避免重跑；Ctrl+C 落点为最近 super-step 边界，走同一终止路径。**已知限制**：同一 team 轮次内部不可中断（粒度=轮之间），demo 够用；
+4. **D-016 复发记录**：本轮 config.py（`--retriever` 参数行、AppConfig.retriever 字段）与 workflows/graph.py（reporter/retriever 导入行）先后被 IDE 旧缓冲区覆盖，均由测试失败定位后补回。提示：请在 IDE 中对这些文件执行"还原文件"或关闭标签页。
+
+### D-022 | 2026-09-03 | 用户确认点：静态中断改为 FINISH 后动态中断（助手自行决定，向负责人报告）
+- **背景**：M5 在线验收发现，静态 `interrupt_before=["team"]` 仅在 team 执行前暂停，首轮正常分析全程无暂停点，用户无法在 Leader 完成计划后选择「出报告 or 追加任务」——交互粒度不符合 T5.1 意图；
+- **修正**：主图新增 `checkpoint` 节点（gate 之后、report 之前）：Leader FINISH 后经 gate 路由至 checkpoint，通过**动态 `interrupt()`** 询问用户；`build_app` 新增 `user_checkpoint` 参数（默认 False=直通，保持离线测试与 M4 兼容）。图结构：`gate ─┬→ team（QC 回环）├→ checkpoint ─┬→ team（追加任务）├→ report └→ END`；
+- **状态**：`AnalysisState` 新增 `user_directive` 字段（None=出报告；文本=注入新指令，同时清空 `stop_reason` 并以 HumanMessage 回注 team，Leader 基于已完成工作重规划）；
+- **app.py 交互协议升级为两类暂停点**：①中断点（team 执行前，静态）：回车=继续 / stop=终止 / 文本=注入指令；②确认点（Leader FINISH 后，动态）：回车/stop=生成报告 / 文本=追加任务。恢复均用 `Command(resume=...)`，持久化依赖外层 SqliteSaver，**不触碰子图嵌套**（D-020 死锁教训）；
+- **在线验收**（run 20260903_092821）：确认点 1（已完成 2 步）追加「美国同期对比」任务 → 续跑完成美国预处理+描述统计 → 确认点 2 确认出报告 → 收敛。LLM 报告因提供方持续超时按 D-021 设计降级为确定性兜底（六要素齐全），中断机制本身验证通过。
+
+### D-023 | 2026-09-03 | 开发期 LLM 提供方切换 OpenCode → Moonshot Kimi（负责人指示，助手执行）
+- **背景**：M5 在线验收期间 OpenCode 链路（opencode.ai，Cloudflare 边缘）间歇性网络黑洞——TCP 可建立但 TLS/HTTP 不完成，请求未达网关（后台无调用记录），120s×5 次重试全部超时；探测显示恢复后 8s 即正常返回，证实与模型推理速度无关，纯属链路故障；
+- **决定**（负责人提供 Key）：`.env` 切换为 Moonshot OpenAI-compatible 接口（`https://api.moonshot.cn/v1`，`kimi-k2.6`），OpenCode 配置注释保留备切回；`core/llm.py get_llm()` 新增 `OPENAI_TEMPERATURE` 环境变量覆盖点——`kimi-k2.6` 仅允许 temperature=1，设该变量强制覆盖所有调用方，无厂商特判逻辑，切回 GLM 后删除即恢复 0.0 确定性；
+- **权衡**：temperature=1 使输出确定性下降（demo 阶段可接受）；架构零改动（D-002 OpenAI-compatible 设计的预期收益）；
+- **验证**：Moonshot 探测 4.6s 返回；用检查点中的真实 M5 状态单独调用 `generate_report`，108s 产出 LLM 六要素报告（校验零缺项），统计量与 tracer 日志逐项一致、无编造——T5.2 LLM 报告路径在线补验通过；离线回归 31 项通过。
 
 ---
 

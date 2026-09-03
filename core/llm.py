@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 
 from langchain_openai import ChatOpenAI
@@ -21,17 +22,24 @@ def get_llm(
 ) -> ChatOpenAI:
     """获取共享 LLM 客户端（不缓存：各 Agent 可能需要不同的 temperature）。
 
-    timeout/max_retries（D-019）：单次调用 120s 超时 + 2 次重试，
+    timeout/max_retries（D-019）：单次调用 120s 超时 + 4 次重试（M5 验收
+    期间提供方延迟曾超过 3 次尝试的 361s 上限，提升至约 600s），
     防止网络劣化时 Agent 无限挂起；可用 kwargs 覆盖。
+
+    temperature 覆盖（D-023）：设置环境变量 OPENAI_TEMPERATURE 后强制
+    覆盖所有调用方的 temperature（部分模型如 kimi-k2.6 仅允许 1）。
     """
     cfg = config or load_config()
+    env_temp = os.getenv("OPENAI_TEMPERATURE")
+    if env_temp is not None:
+        temperature = float(env_temp)
     return ChatOpenAI(
         model=cfg.model,
         api_key=cfg.api_key,
         base_url=cfg.base_url,
         temperature=temperature,
         timeout=kwargs.pop("timeout", 120),
-        max_retries=kwargs.pop("max_retries", 2),
+        max_retries=kwargs.pop("max_retries", 4),
         **kwargs,
     )
 

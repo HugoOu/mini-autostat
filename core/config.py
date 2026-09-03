@@ -37,6 +37,10 @@ class AppConfig:
     max_turns: int = 12          # Leader 调度步数硬上限
     max_repair_rounds: int = 3   # 建模 Worker 代码报错自修复最大轮数
 
+    # ---- 知识检索（T5.3 / D-021：null=关闭，static=静态方法目录，
+    #      未来接真实 RAG 时在 knowledge/retriever.py 工厂注册新 provider）----
+    retriever: str = "null"
+
     # ---- 路径 ----
     data_path: Path = Path("owid-energy-data.csv")
     output_dir: Path = Path("outputs")   # figures/ 与 reports/ 的父目录
@@ -48,6 +52,7 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--model", help="LLM 模型名称（默认取 OPENAI_MODEL）")
     p.add_argument("--max-turns", type=int, help="Leader 调度步数硬上限")
     p.add_argument("--max-repair-rounds", type=int, help="代码修复最大轮数")
+    p.add_argument("--retriever", help="知识检索 provider：null/static（默认 null，T5.3）")
     p.add_argument("--data", help="数据文件路径")
     p.add_argument("--output-dir", help="输出目录（默认 outputs）")
     p.add_argument("--log-dir", help="运行日志目录（默认 logs）")
@@ -67,6 +72,7 @@ def load_config(argv: list[str] | None = None) -> AppConfig:
             args.max_repair_rounds
             or int(os.getenv("MAX_REPAIR_ROUNDS", AppConfig.max_repair_rounds))
         ),
+        retriever=args.retriever or os.getenv("RETRIEVER", AppConfig.retriever),
         data_path=Path(args.data or os.getenv("DATA_PATH", AppConfig.data_path)),
         output_dir=Path(args.output_dir or AppConfig.output_dir),
         log_dir=Path(args.log_dir or AppConfig.log_dir),

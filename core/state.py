@@ -54,6 +54,9 @@ class AnalysisState(TypedDict, total=False):
     synced_msg_count: int             # 消息游标：sync 节点增量解析 Worker 输出
     remaining_steps: int              # langgraph 1.x ReactAgent 要求的运行时注入字段
 
+    # ---- M5 中断/确认点（D-022）----
+    user_directive: str | None        # checkpoint 节点的本轮用户决策：None=出报告，文本=注入新指令
+
 
 def check_termination(state: AnalysisState, max_turns: int) -> tuple[bool, str | None]:
     """终止机制（T2.4）：三重条件检查，返回 (是否终止, 原因)。
